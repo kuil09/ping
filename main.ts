@@ -14,19 +14,27 @@ type Room = {
   pushCooldownUntil: number;
 };
 
+type ClusterMessage =
+  | { type: "signal"; roomId: string; activeUntil: number }
+  | { type: "subscribe"; roomId: string; clientId: string; subscription: PushSubscription }
+  | { type: "state-request"; roomId: string; requestId: string }
+  | { type: "state-response"; roomId: string; requestId: string; activeUntil: number };
+
 const rooms = new Map<string, Room>();
 const encoder = new TextEncoder();
 const SIGNAL_TTL_MS = 5 * 60_000;
 const PUSH_COOLDOWN_MS = 60_000;
+const cluster = new BroadcastChannel("ping:v1");
+const stateWaiters = new Map<string, { roomId: string; activeUntil: number }>();
 
-const generatedVapid = webpush.generateVAPIDKeys();
-const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? generatedVapid.publicKey;
-const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? generatedVapid.privateKey;
-const vapidSubject = Deno.env.get("VAPID_SUBJECT") ??
-  "mailto:ping@example.invalid";
-const pushEnabled = true;
+const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? "";
+const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? "";
+const vapidSubject = Deno.env.get("VAPID_SUBJECT") ?? "mailto:ping@example.invalid";
+const pushEnabled = Boolean(vapidPublicKey && vapidPrivateKey);
 
-webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+if (pushEnabled) {
+  webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+}
 
 function roomFor(id: string): Room {
   let room = rooms.get(id);
@@ -71,6 +79,61 @@ function broadcast(room: Room, event: string, data: unknown) {
   }
 }
 
+function applySignal(roomId: string, activeUntil: number) {
+  const room = roomFor(roomId);
+  room.activeUntil = Math.max(room.activeUntil, activeUntil);
+  broadcast(room, "signal", { active: room.activeUntil > Date.now(), activeUntil: room.activeUntil });
+}
+
+cluster.onmessage = (event: MessageEvent<ClusterMessage>) => {
+  const message = event.data;
+
+  if (message.type === "signal") {
+    applySignal(message.roomId, message.activeUntil);
+    return;
+  }
+
+  if (message.type === "subscribe") {
+    roomFor(message.roomId).subscriptions.set(message.clientId, message.subscription);
+    return;
+  }
+
+  if (message.type === "state-request") {
+    const room = rooms.get(message.roomId);
+    const activeUntil = room?.activeUntil ?? 0;
+    if (activeUntil > Date.now()) {
+      cluster.postMessage({
+        type: "state-response",
+        roomId: message.roomId,
+        requestId: message.requestId,
+        activeUntil,
+      } satisfies ClusterMessage);
+    }
+    return;
+  }
+
+  if (message.type === "state-response") {
+    const waiter = stateWaiters.get(message.requestId);
+    if (waiter && waiter.roomId === message.roomId) {
+      waiter.activeUntil = Math.max(waiter.activeUntil, message.activeUntil);
+    }
+  }
+};
+
+async function syncedActiveUntil(roomId: string): Promise<number> {
+  const room = roomFor(roomId);
+  const requestId = crypto.randomUUID();
+  const waiter = { roomId, activeUntil: room.activeUntil };
+  stateWaiters.set(requestId, waiter);
+
+  cluster.postMessage({ type: "state-request", roomId, requestId } satisfies ClusterMessage);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  stateWaiters.delete(requestId);
+
+  room.activeUntil = Math.max(room.activeUntil, waiter.activeUntil);
+  return room.activeUntil > Date.now() ? room.activeUntil : 0;
+}
+
 async function sendPushes(roomId: string, room: Room, senderClientId: string) {
   if (!pushEnabled || Date.now() < room.pushCooldownUntil) return;
   room.pushCooldownUntil = Date.now() + PUSH_COOLDOWN_MS;
@@ -110,18 +173,22 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
     });
   }
 
-  const match = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(state|events|signal|subscribe)$/);
+  const match = url.pathname.match(
+    /^\/api\/rooms\/([^/]+)\/(state|events|signal|subscribe)$/,
+  );
   if (!match) return null;
 
   const roomId = decodeURIComponent(match[1]);
   const action = match[2];
-  if (!validRoomId(roomId)) return json({ error: "invalid room" }, { status: 400 });
+  if (!validRoomId(roomId)) {
+    return json({ error: "invalid room" }, { status: 400 });
+  }
 
   const room = roomFor(roomId);
 
   if (action === "state" && req.method === "GET") {
-    const active = room.activeUntil > Date.now();
-    return json({ active, activeUntil: active ? room.activeUntil : 0 });
+    const activeUntil = await syncedActiveUntil(roomId);
+    return json({ active: activeUntil > Date.now(), activeUntil });
   }
 
   if (action === "events" && req.method === "GET") {
@@ -131,10 +198,19 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
         controllerRef = controller;
         room.clients.add(controller);
         controller.enqueue(encoder.encode(": connected\n\n"));
-        const active = room.activeUntil > Date.now();
-        controller.enqueue(
-          ssePayload("state", { active, activeUntil: active ? room.activeUntil : 0 }),
-        );
+
+        void syncedActiveUntil(roomId).then((activeUntil) => {
+          try {
+            controller.enqueue(
+              ssePayload("state", {
+                active: activeUntil > Date.now(),
+                activeUntil,
+              }),
+            );
+          } catch {
+            room.clients.delete(controller);
+          }
+        });
       },
       cancel() {
         if (controllerRef) room.clients.delete(controllerRef);
@@ -159,17 +235,18 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
       // clientId is optional
     }
 
-    const now = Date.now();
-    room.activeUntil = now + SIGNAL_TTL_MS;
-    const state = { active: true, activeUntil: room.activeUntil };
-    broadcast(room, "signal", state);
+    const activeUntil = Date.now() + SIGNAL_TTL_MS;
+    applySignal(roomId, activeUntil);
+    cluster.postMessage({ type: "signal", roomId, activeUntil } satisfies ClusterMessage);
 
     void sendPushes(roomId, room, body.clientId ?? "");
-    return json(state);
+    return json({ active: true, activeUntil });
   }
 
   if (action === "subscribe" && req.method === "POST") {
-    if (!pushEnabled) return json({ error: "push disabled" }, { status: 503 });
+    if (!pushEnabled) {
+      return json({ error: "push disabled" }, { status: 503 });
+    }
 
     const body = await req.json().catch(() => null) as
       | { clientId?: string; subscription?: PushSubscription }
@@ -180,6 +257,13 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
     }
 
     room.subscriptions.set(body.clientId, body.subscription);
+    cluster.postMessage({
+      type: "subscribe",
+      roomId,
+      clientId: body.clientId,
+      subscription: body.subscription,
+    } satisfies ClusterMessage);
+
     return json({ ok: true });
   }
 
