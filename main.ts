@@ -1,5 +1,5 @@
 import { serveDir, serveFile } from "@std/http/file-server";
-import webpush from "npm:web-push@3.6.7";
+import webpush from "web-push";
 
 type PushSubscription = {
   endpoint: string;
