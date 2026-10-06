@@ -15,3 +15,4 @@ jobs:
           deno-version: v2.x
       - run: deno lint main.ts
       - run: deno check main.ts
+      - run: deno eval 'import webpush from "web-push"; const keys = webpush.generateVAPIDKeys(); if (!keys.publicKey || !keys.privateKey) Deno.exit(1);'
