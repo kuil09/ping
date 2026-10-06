@@ -41,7 +41,11 @@ const remotePresence = new Map<string, Map<string, PresenceSnapshot>>();
 
 const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? "";
 const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? "";
-const vapidSubject = Deno.env.get("VAPID_SUBJECT") ?? "mailto:ping@example.invalid";
+const rawVapidSubject = Deno.env.get("VAPID_SUBJECT") ?? "mailto:ping@example.invalid";
+const vapidSubject = rawVapidSubject.includes("@") &&
+    !rawVapidSubject.startsWith("mailto:")
+  ? `mailto:${rawVapidSubject}`
+  : rawVapidSubject;
 const pushEnabled = Boolean(vapidPublicKey && vapidPrivateKey);
 
 if (pushEnabled) {
