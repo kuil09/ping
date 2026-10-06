@@ -5,14 +5,49 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PING_KV_URL: http://127.0.0.1:4512
+      DENO_KV_ACCESS_TOKEN: local-ci-test-token-not-a-production-secret
     steps:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno lint main.ts
-      - run: deno check main.ts
-      - run: deno eval 'import webpush from "web-push"; const keys = webpush.generateVAPIDKeys(); if (!keys.publicKey || !keys.privateKey) Deno.exit(1);'
+      - run: deno task check
+      - run: deno task test
+      - name: Start a shared KV backend for two independent app processes
+        run: |
+          mkdir -p .ci-kv
+          chmod 777 .ci-kv
+          docker run -d --init --name ping-kv -p 127.0.0.1:4512:4512 -v "$PWD/.ci-kv:/data" ghcr.io/denoland/denokv --sqlite-path /data/kv.sqlite serve --access-token "$DENO_KV_ACCESS_TOKEN"
+          PORT=9101 deno run -A main.ts > server-a.log 2>&1 &
+          PORT=9102 deno run -A main.ts > server-b.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9101/api/health && curl -fsS http://127.0.0.1:9102/api/health; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9101/api/health
+          curl -fsS http://127.0.0.1:9102/api/health
+      - name: Install browser test tools
+        run: |
+          npm install --no-save --package-lock=false @playwright/test@1.56.1
+          npx playwright install --with-deps chromium webkit
+      - name: Cross-process Chromium and WebKit tests
+        run: npx playwright test --config=playwright.config.cjs
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ping-regression-evidence
+          path: |
+            test-results/
+            server-a.log
+            server-b.log
+          retention-days: 7
