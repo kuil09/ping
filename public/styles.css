@@ -6,7 +6,6 @@
   --bg: #f4f1ea;
   --fg: #141414;
   --muted: #a8a49b;
-  --life: 0;
 }
 
 * {
@@ -82,7 +81,7 @@ header {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 72px 24px;
+  padding: 88px 24px 120px;
 }
 
 .signal {
@@ -98,72 +97,114 @@ header {
 }
 
 .signal span {
-  width: calc(44% + 22% * var(--life));
+  width: 46%;
   aspect-ratio: 1;
   border-radius: 50%;
   background: var(--fg);
-  opacity: calc(.16 + .84 * var(--life));
-  box-shadow:
-    0 0 0 calc(44px * var(--life))
-      color-mix(in srgb, var(--fg) calc(7% * var(--life)), transparent),
-    0 0 0 calc(88px * var(--life))
-      color-mix(in srgb, var(--fg) calc(3% * var(--life)), transparent);
+  opacity: .16;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--fg) 9%, transparent);
   transition:
-    width 180ms cubic-bezier(.2, .8, .2, 1),
-    opacity 180ms ease,
-    box-shadow 180ms ease,
+    width 160ms cubic-bezier(.2, .8, .2, 1),
+    opacity 160ms ease,
+    box-shadow 220ms ease,
     transform 120ms ease;
 }
 
 .signal:active span {
-  transform: scale(.88);
-}
-
-body.active .signal span {
-  animation: breathe 2.8s ease-in-out infinite;
+  width: 62%;
+  opacity: .9;
+  transform: scale(.9);
+  box-shadow:
+    0 0 0 34px color-mix(in srgb, var(--fg) 5%, transparent),
+    0 0 0 68px color-mix(in srgb, var(--fg) 2%, transparent);
 }
 
 body.sending .signal span {
-  transform: scale(.82);
+  opacity: .75;
 }
 
-.presence {
+.users {
   position: absolute;
-  top: calc(50% + min(39vw, 176px));
   left: 50%;
-  width: 72px;
-  height: 72px;
+  top: calc(50% + min(40vw, 182px));
+  width: min(78vw, 360px);
+  min-height: 58px;
   transform: translateX(-50%);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   pointer-events: none;
-  opacity: .68;
 }
 
-.presence span {
-  --size: calc(10px + (var(--i) * 6px));
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: var(--size);
-  height: var(--size);
-  border: 1px solid color-mix(in srgb, var(--fg) 46%, transparent);
+.user {
+  --user-life: 0;
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+}
+
+.user-dot {
+  position: relative;
+  width: 29px;
+  height: 29px;
   border-radius: 50%;
-  transform: translate(-50%, -50%);
+  border: 1px solid color-mix(in srgb, var(--fg) 34%, transparent);
+  display: grid;
+  place-items: center;
+  transition:
+    background 200ms ease,
+    border-color 200ms ease,
+    transform 180ms ease,
+    box-shadow 220ms ease;
 }
 
-.presence.empty {
-  opacity: .14;
+.user-core {
+  font-size: 8px;
+  line-height: 1;
+  letter-spacing: -.02em;
+  font-weight: 700;
+  opacity: .35;
+  user-select: none;
 }
 
-.presence.empty::before {
+.user[data-active="true"] .user-dot {
+  background: color-mix(
+    in srgb,
+    var(--fg) calc(12% + 78% * var(--user-life)),
+    transparent
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--fg) calc(28% + 60% * var(--user-life)),
+    transparent
+  );
+  box-shadow:
+    0 0 0 calc(5px * var(--user-life))
+      color-mix(in srgb, var(--fg) calc(4% * var(--user-life)), transparent),
+    0 0 0 calc(10px * var(--user-life))
+      color-mix(in srgb, var(--fg) calc(2% * var(--user-life)), transparent);
+}
+
+.user[data-active="true"] .user-core {
+  color: var(--bg);
+  opacity: calc(.35 + .65 * var(--user-life));
+}
+
+.user[data-self="true"]::after {
   content: "";
   position: absolute;
-  top: 50%;
+  bottom: -5px;
   left: 50%;
-  width: 8px;
-  height: 8px;
-  border: 1px solid color-mix(in srgb, var(--fg) 35%, transparent);
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
-  transform: translate(-50%, -50%);
+  background: var(--fg);
+  transform: translateX(-50%);
+  opacity: .38;
 }
 
 .connection {
@@ -181,16 +222,6 @@ body.sending .signal span {
 .connection.online {
   background: var(--fg);
   opacity: .22;
-}
-
-@keyframes breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(calc(.985 + .03 * var(--life)));
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
