@@ -19,14 +19,14 @@ const encoder = new TextEncoder();
 const SIGNAL_TTL_MS = 5 * 60_000;
 const PUSH_COOLDOWN_MS = 60_000;
 
-const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? "";
-const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? "";
-const vapidSubject = Deno.env.get("VAPID_SUBJECT") ?? "mailto:ping@example.invalid";
-const pushEnabled = Boolean(vapidPublicKey && vapidPrivateKey);
+const generatedVapid = webpush.generateVAPIDKeys();
+const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? generatedVapid.publicKey;
+const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? generatedVapid.privateKey;
+const vapidSubject = Deno.env.get("VAPID_SUBJECT") ??
+  "mailto:ping@example.invalid";
+const pushEnabled = true;
 
-if (pushEnabled) {
-  webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
-}
+webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
 
 function roomFor(id: string): Room {
   let room = rooms.get(id);
