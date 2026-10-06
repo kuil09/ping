@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "dev": "deno run --watch --allow-net --allow-read --allow-env main.ts",
+    "start": "deno run --allow-net --allow-read --allow-env main.ts",
+    "check": "deno fmt --check && deno lint && deno check main.ts public/app.js public/sw.js"
+  },
+  "imports": {
+    "@std/http": "jsr:@std/http@^1.0.21"
+  }
+}

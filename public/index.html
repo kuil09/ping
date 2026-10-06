@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#f4f1ea">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="ping">
+  <title>ping</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <button id="share" class="icon" aria-label="Share room" title="Share">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4 4m-4-4L8 7M5 11v8h14v-8"/></svg>
+      </button>
+      <button id="notify" class="icon" aria-label="Enable notifications" title="Notifications">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16h12l-1.5-2V9a4.5 4.5 0 0 0-9 0v5L6 16Zm4 3h4"/></svg>
+      </button>
+    </header>
+
+    <section class="stage" aria-live="polite">
+      <button id="signal" class="signal" aria-label="Send signal">
+        <span></span>
+      </button>
+    </section>
+
+    <div id="connection" class="connection" aria-hidden="true"></div>
+  </main>
+</body>
+</html>
