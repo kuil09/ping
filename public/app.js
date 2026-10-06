@@ -3,17 +3,15 @@ const signalButton = document.querySelector("#signal");
 const notifyButton = document.querySelector("#notify");
 const shareButton = document.querySelector("#share");
 const connection = document.querySelector("#connection");
-const presence = document.querySelector("#presence");
+const usersEl = document.querySelector("#users");
 
 const clientId = localStorage.getItem("ping:clientId") ?? crypto.randomUUID();
 localStorage.setItem("ping:clientId", clientId);
 
-let activeUntil = 0;
 let eventSource;
-let expiryTimer;
-let fadeFrame;
 let audioContext;
 let config = { pushEnabled: false, vapidPublicKey: null, signalTtlMs: 300000 };
+let users = [];
 
 function unlockAudio() {
   audioContext ??= new (window.AudioContext || window.webkitAudioContext)();
@@ -29,65 +27,64 @@ function playPing() {
   const gain = audioContext.createGain();
 
   osc.type = "sine";
-  osc.frequency.setValueAtTime(880, now);
-  osc.frequency.exponentialRampToValueAtTime(440, now + 0.42);
+  osc.frequency.setValueAtTime(920, now);
+  osc.frequency.exponentialRampToValueAtTime(460, now + 0.48);
 
   gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
+  gain.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
 
   osc.connect(gain);
   gain.connect(audioContext.destination);
   osc.start(now);
-  osc.stop(now + 0.58);
+  osc.stop(now + 0.64);
 }
 
-function renderPresence(count = 0) {
-  const capped = Math.min(Math.max(count, 0), 8);
-  presence.replaceChildren();
+function shortId(value) {
+  return value.slice(0, 2).toUpperCase();
+}
 
-  for (let i = 0; i < capped; i += 1) {
-    const ring = document.createElement("span");
-    ring.style.setProperty("--i", i);
-    presence.appendChild(ring);
+function renderUsers(nextUsers) {
+  users = nextUsers;
+  usersEl.replaceChildren();
+
+  for (const user of users) {
+    const item = document.createElement("div");
+    item.className = "user";
+    item.dataset.self = String(user.clientId === clientId);
+    item.dataset.active = String(user.pingUntil > Date.now());
+
+    const dot = document.createElement("span");
+    dot.className = "user-dot";
+
+    const core = document.createElement("span");
+    core.className = "user-core";
+    core.textContent = shortId(user.clientId);
+
+    dot.appendChild(core);
+    item.appendChild(dot);
+    usersEl.appendChild(item);
   }
 
-  presence.classList.toggle("empty", capped === 0);
-  presence.setAttribute("aria-label", `${count} people in this channel`);
+  usersEl.setAttribute("aria-label", `${users.length} people in this channel`);
 }
 
-function updateFade() {
-  cancelAnimationFrame(fadeFrame);
+function refreshUserStates() {
+  const now = Date.now();
+  const items = [...usersEl.querySelectorAll(".user")];
 
-  const tick = () => {
-    const remaining = Math.max(0, activeUntil - Date.now());
+  users.forEach((user, index) => {
+    const item = items[index];
+    if (!item) return;
+
+    const remaining = Math.max(0, user.pingUntil - now);
     const life = Math.min(1, remaining / config.signalTtlMs);
-    document.documentElement.style.setProperty("--life", String(life));
 
-    if (remaining > 0) {
-      fadeFrame = requestAnimationFrame(tick);
-    } else {
-      document.body.classList.remove("active");
-      document.documentElement.style.setProperty("--life", "0");
-    }
-  };
+    item.dataset.active = String(remaining > 0);
+    item.style.setProperty("--user-life", String(life));
+  });
 
-  tick();
-}
-
-function setActive(until = 0) {
-  activeUntil = until;
-  const active = until > Date.now();
-  document.body.classList.toggle("active", active);
-
-  clearTimeout(expiryTimer);
-  if (active) {
-    updateFade();
-    expiryTimer = setTimeout(() => setActive(0), Math.max(0, until - Date.now()) + 20);
-  } else {
-    cancelAnimationFrame(fadeFrame);
-    document.documentElement.style.setProperty("--life", "0");
-  }
+  requestAnimationFrame(refreshUserStates);
 }
 
 async function loadState() {
@@ -98,8 +95,7 @@ async function loadState() {
   if (!response.ok) return;
 
   const state = await response.json();
-  setActive(state.active ? state.activeUntil : 0);
-  renderPresence(state.presence ?? 0);
+  renderUsers(state.users ?? []);
 }
 
 function connectEvents() {
@@ -111,21 +107,24 @@ function connectEvents() {
   eventSource.onopen = () => connection.classList.add("online");
   eventSource.onerror = () => connection.classList.remove("online");
 
-  eventSource.addEventListener("state", (event) => {
+  eventSource.addEventListener("users", (event) => {
     const state = JSON.parse(event.data);
-    setActive(state.active ? state.activeUntil : 0);
-  });
-
-  eventSource.addEventListener("presence", (event) => {
-    const state = JSON.parse(event.data);
-    renderPresence(state.count ?? 0);
+    renderUsers(state.users ?? []);
   });
 
   eventSource.addEventListener("signal", (event) => {
-    const state = JSON.parse(event.data);
-    setActive(state.active ? state.activeUntil : 0);
-    playPing();
-    if (navigator.vibrate) navigator.vibrate([25, 25, 45]);
+    const signal = JSON.parse(event.data);
+
+    const existing = users.find((user) => user.clientId === signal.clientId);
+    if (existing) {
+      existing.pingUntil = signal.pingUntil;
+      renderUsers(users);
+    }
+
+    if (signal.clientId !== clientId) {
+      playPing();
+      if (navigator.vibrate) navigator.vibrate([25, 25, 45]);
+    }
   });
 }
 
@@ -148,9 +147,16 @@ signalButton.addEventListener("click", async () => {
         body: JSON.stringify({ clientId }),
       },
     );
+
     if (!response.ok) throw new Error("signal failed");
-    const state = await response.json();
-    setActive(state.activeUntil);
+
+    const signal = await response.json();
+    const existing = users.find((user) => user.clientId === clientId);
+
+    if (existing) {
+      existing.pingUntil = signal.pingUntil;
+      renderUsers(users);
+    }
   } finally {
     document.body.classList.remove("sending");
   }
@@ -230,6 +236,7 @@ async function boot() {
 
   await loadState();
   connectEvents();
+  requestAnimationFrame(refreshUserStates);
 }
 
 document.addEventListener("visibilitychange", () => {
