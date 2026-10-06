@@ -7,7 +7,7 @@ A tiny ephemeral signal PWA.
 - One shared room per URL
 - One-tap signal
 - SSE while open
-- Web Push when configured
+- Web Push while closed/backgrounded
 - All runtime state is in memory and may disappear on restart
 
 ## Run
@@ -26,13 +26,15 @@ http://localhost:8000/r/demo
 
 Entrypoint: `main.ts`
 
-Optional Web Push environment variables:
+No database, Redis, or required environment variables.
+
+At startup the server generates an ephemeral VAPID key pair for Web Push. On restart, room state, subscriptions, and the VAPID key all reset together.
+
+Optional overrides:
 
 - `VAPID_PUBLIC_KEY`
 - `VAPID_PRIVATE_KEY`
-- `VAPID_SUBJECT` (for example `mailto:you@example.com`)
-
-Without VAPID variables, the app still works through SSE while the page is open.
+- `VAPID_SUBJECT`
 
 ## Product model
 
