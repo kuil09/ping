@@ -9,23 +9,35 @@ type PushSubscription = {
 
 type Room = {
   activeUntil: number;
-  clients: Set<ReadableStreamDefaultController<Uint8Array>>;
+  clients: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
   subscriptions: Map<string, PushSubscription>;
   pushCooldownUntil: number;
+};
+
+type PresenceSnapshot = {
+  instanceId: string;
+  roomId: string;
+  clientIds: string[];
+  ts: number;
 };
 
 type ClusterMessage =
   | { type: "signal"; roomId: string; activeUntil: number }
   | { type: "subscribe"; roomId: string; clientId: string; subscription: PushSubscription }
   | { type: "state-request"; roomId: string; requestId: string }
-  | { type: "state-response"; roomId: string; requestId: string; activeUntil: number };
+  | { type: "state-response"; roomId: string; requestId: string; activeUntil: number }
+  | { type: "presence"; snapshot: PresenceSnapshot };
 
 const rooms = new Map<string, Room>();
 const encoder = new TextEncoder();
 const SIGNAL_TTL_MS = 5 * 60_000;
 const PUSH_COOLDOWN_MS = 60_000;
-const cluster = new BroadcastChannel("ping:v1");
+const PRESENCE_TTL_MS = 15_000;
+const PRESENCE_HEARTBEAT_MS = 5_000;
+const instanceId = crypto.randomUUID();
+const cluster = new BroadcastChannel("ping:v2");
 const stateWaiters = new Map<string, { roomId: string; activeUntil: number }>();
+const remotePresence = new Map<string, Map<string, PresenceSnapshot>>();
 
 const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? "";
 const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? "";
@@ -41,7 +53,7 @@ function roomFor(id: string): Room {
   if (!room) {
     room = {
       activeUntil: 0,
-      clients: new Set(),
+      clients: new Map(),
       subscriptions: new Map(),
       pushCooldownUntil: 0,
     };
@@ -70,19 +82,62 @@ function ssePayload(event: string, data: unknown): Uint8Array {
 
 function broadcast(room: Room, event: string, data: unknown) {
   const payload = ssePayload(event, data);
-  for (const controller of room.clients) {
-    try {
-      controller.enqueue(payload);
-    } catch {
-      room.clients.delete(controller);
+  for (const [clientId, controllers] of room.clients) {
+    for (const controller of controllers) {
+      try {
+        controller.enqueue(payload);
+      } catch {
+        controllers.delete(controller);
+      }
+    }
+    if (controllers.size === 0) room.clients.delete(clientId);
+  }
+}
+
+function localClientIds(roomId: string): string[] {
+  return [...roomFor(roomId).clients.keys()];
+}
+
+function publishPresence(roomId: string) {
+  const snapshot: PresenceSnapshot = {
+    instanceId,
+    roomId,
+    clientIds: localClientIds(roomId),
+    ts: Date.now(),
+  };
+  cluster.postMessage({ type: "presence", snapshot } satisfies ClusterMessage);
+  broadcastPresence(roomId);
+}
+
+function presenceCount(roomId: string): number {
+  const ids = new Set(localClientIds(roomId));
+  const now = Date.now();
+  const byInstance = remotePresence.get(roomId);
+
+  if (byInstance) {
+    for (const [remoteId, snapshot] of byInstance) {
+      if (now - snapshot.ts > PRESENCE_TTL_MS) {
+        byInstance.delete(remoteId);
+        continue;
+      }
+      for (const clientId of snapshot.clientIds) ids.add(clientId);
     }
   }
+
+  return ids.size;
+}
+
+function broadcastPresence(roomId: string) {
+  broadcast(roomFor(roomId), "presence", { count: presenceCount(roomId) });
 }
 
 function applySignal(roomId: string, activeUntil: number) {
   const room = roomFor(roomId);
   room.activeUntil = Math.max(room.activeUntil, activeUntil);
-  broadcast(room, "signal", { active: room.activeUntil > Date.now(), activeUntil: room.activeUntil });
+  broadcast(room, "signal", {
+    active: room.activeUntil > Date.now(),
+    activeUntil: room.activeUntil,
+  });
 }
 
 cluster.onmessage = (event: MessageEvent<ClusterMessage>) => {
@@ -95,6 +150,19 @@ cluster.onmessage = (event: MessageEvent<ClusterMessage>) => {
 
   if (message.type === "subscribe") {
     roomFor(message.roomId).subscriptions.set(message.clientId, message.subscription);
+    return;
+  }
+
+  if (message.type === "presence") {
+    const { snapshot } = message;
+    if (snapshot.instanceId === instanceId) return;
+    let byInstance = remotePresence.get(snapshot.roomId);
+    if (!byInstance) {
+      byInstance = new Map();
+      remotePresence.set(snapshot.roomId, byInstance);
+    }
+    byInstance.set(snapshot.instanceId, snapshot);
+    broadcastPresence(snapshot.roomId);
     return;
   }
 
@@ -119,6 +187,10 @@ cluster.onmessage = (event: MessageEvent<ClusterMessage>) => {
     }
   }
 };
+
+setInterval(() => {
+  for (const roomId of rooms.keys()) publishPresence(roomId);
+}, PRESENCE_HEARTBEAT_MS);
 
 async function syncedActiveUntil(roomId: string): Promise<number> {
   const room = roomFor(roomId);
@@ -188,16 +260,31 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
 
   if (action === "state" && req.method === "GET") {
     const activeUntil = await syncedActiveUntil(roomId);
-    return json({ active: activeUntil > Date.now(), activeUntil });
+    return json({
+      active: activeUntil > Date.now(),
+      activeUntil,
+      presence: presenceCount(roomId),
+    });
   }
 
   if (action === "events" && req.method === "GET") {
+    const clientId = url.searchParams.get("clientId") ?? crypto.randomUUID();
     let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         controllerRef = controller;
-        room.clients.add(controller);
+
+        let controllers = room.clients.get(clientId);
+        if (!controllers) {
+          controllers = new Set();
+          room.clients.set(clientId, controllers);
+        }
+        controllers.add(controller);
+        publishPresence(roomId);
+
         controller.enqueue(encoder.encode(": connected\n\n"));
+        controller.enqueue(ssePayload("presence", { count: presenceCount(roomId) }));
 
         void syncedActiveUntil(roomId).then((activeUntil) => {
           try {
@@ -208,12 +295,16 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
               }),
             );
           } catch {
-            room.clients.delete(controller);
+            controllers?.delete(controller);
           }
         });
       },
       cancel() {
-        if (controllerRef) room.clients.delete(controllerRef);
+        if (!controllerRef) return;
+        const controllers = room.clients.get(clientId);
+        controllers?.delete(controllerRef);
+        if (controllers?.size === 0) room.clients.delete(clientId);
+        publishPresence(roomId);
       },
     });
 
@@ -244,9 +335,7 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
   }
 
   if (action === "subscribe" && req.method === "POST") {
-    if (!pushEnabled) {
-      return json({ error: "push disabled" }, { status: 503 });
-    }
+    if (!pushEnabled) return json({ error: "push disabled" }, { status: 503 });
 
     const body = await req.json().catch(() => null) as
       | { clientId?: string; subscription?: PushSubscription }
