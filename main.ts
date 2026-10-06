@@ -8,35 +8,46 @@ type PushSubscription = {
 };
 
 type Room = {
-  activeUntil: number;
   clients: Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>;
+  pingUntil: Map<string, number>;
   subscriptions: Map<string, PushSubscription>;
-  pushCooldownUntil: number;
+};
+
+type UserState = {
+  clientId: string;
+  pingUntil: number;
 };
 
 type PresenceSnapshot = {
   instanceId: string;
   roomId: string;
-  clientIds: string[];
+  users: UserState[];
   ts: number;
 };
 
 type ClusterMessage =
-  | { type: "signal"; roomId: string; activeUntil: number }
-  | { type: "subscribe"; roomId: string; clientId: string; subscription: PushSubscription }
-  | { type: "state-request"; roomId: string; requestId: string }
-  | { type: "state-response"; roomId: string; requestId: string; activeUntil: number }
+  | {
+    type: "signal";
+    roomId: string;
+    clientId: string;
+    pingUntil: number;
+    eventId: string;
+  }
+  | {
+    type: "subscribe";
+    roomId: string;
+    clientId: string;
+    subscription: PushSubscription;
+  }
   | { type: "presence"; snapshot: PresenceSnapshot };
 
 const rooms = new Map<string, Room>();
 const encoder = new TextEncoder();
 const SIGNAL_TTL_MS = 5 * 60_000;
-const PUSH_COOLDOWN_MS = 60_000;
 const PRESENCE_TTL_MS = 15_000;
 const PRESENCE_HEARTBEAT_MS = 5_000;
 const instanceId = crypto.randomUUID();
-const cluster = new BroadcastChannel("ping:v2");
-const stateWaiters = new Map<string, { roomId: string; activeUntil: number }>();
+const cluster = new BroadcastChannel("ping:v3");
 const remotePresence = new Map<string, Map<string, PresenceSnapshot>>();
 
 const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? "";
@@ -56,10 +67,9 @@ function roomFor(id: string): Room {
   let room = rooms.get(id);
   if (!room) {
     room = {
-      activeUntil: 0,
       clients: new Map(),
+      pingUntil: new Map(),
       subscriptions: new Map(),
-      pushCooldownUntil: 0,
     };
     rooms.set(id, room);
   }
@@ -86,6 +96,7 @@ function ssePayload(event: string, data: unknown): Uint8Array {
 
 function broadcast(room: Room, event: string, data: unknown) {
   const payload = ssePayload(event, data);
+
   for (const [clientId, controllers] of room.clients) {
     for (const controller of controllers) {
       try {
@@ -94,101 +105,123 @@ function broadcast(room: Room, event: string, data: unknown) {
         controllers.delete(controller);
       }
     }
+
     if (controllers.size === 0) room.clients.delete(clientId);
   }
 }
 
-function localClientIds(roomId: string): string[] {
-  return [...roomFor(roomId).clients.keys()];
+function localUsers(roomId: string): UserState[] {
+  const room = roomFor(roomId);
+  return [...room.clients.keys()].map((clientId) => ({
+    clientId,
+    pingUntil: room.pingUntil.get(clientId) ?? 0,
+  }));
 }
 
-function publishPresence(roomId: string) {
-  const snapshot: PresenceSnapshot = {
-    instanceId,
-    roomId,
-    clientIds: localClientIds(roomId),
-    ts: Date.now(),
-  };
-  cluster.postMessage({ type: "presence", snapshot } satisfies ClusterMessage);
-  broadcastPresence(roomId);
-}
-
-function presenceCount(roomId: string): number {
-  const ids = new Set(localClientIds(roomId));
+function mergedUsers(roomId: string): UserState[] {
+  const byClient = new Map<string, number>();
   const now = Date.now();
-  const byInstance = remotePresence.get(roomId);
 
+  for (const user of localUsers(roomId)) {
+    byClient.set(user.clientId, user.pingUntil);
+  }
+
+  const byInstance = remotePresence.get(roomId);
   if (byInstance) {
     for (const [remoteId, snapshot] of byInstance) {
       if (now - snapshot.ts > PRESENCE_TTL_MS) {
         byInstance.delete(remoteId);
         continue;
       }
-      for (const clientId of snapshot.clientIds) ids.add(clientId);
+
+      for (const user of snapshot.users) {
+        byClient.set(
+          user.clientId,
+          Math.max(byClient.get(user.clientId) ?? 0, user.pingUntil),
+        );
+      }
     }
   }
 
-  return ids.size;
+  return [...byClient.entries()]
+    .map(([clientId, pingUntil]) => ({ clientId, pingUntil }))
+    .sort((a, b) => a.clientId.localeCompare(b.clientId));
 }
 
-function broadcastPresence(roomId: string) {
-  broadcast(roomFor(roomId), "presence", { count: presenceCount(roomId) });
+function broadcastUsers(roomId: string) {
+  broadcast(roomFor(roomId), "users", { users: mergedUsers(roomId) });
 }
 
-function applySignal(roomId: string, activeUntil: number) {
+function publishPresence(roomId: string) {
+  const snapshot: PresenceSnapshot = {
+    instanceId,
+    roomId,
+    users: localUsers(roomId),
+    ts: Date.now(),
+  };
+
+  cluster.postMessage({ type: "presence", snapshot } satisfies ClusterMessage);
+  broadcastUsers(roomId);
+}
+
+function applySignal(
+  roomId: string,
+  clientId: string,
+  pingUntil: number,
+  eventId: string,
+) {
   const room = roomFor(roomId);
-  room.activeUntil = Math.max(room.activeUntil, activeUntil);
+  room.pingUntil.set(clientId, pingUntil);
+
   broadcast(room, "signal", {
-    active: room.activeUntil > Date.now(),
-    activeUntil: room.activeUntil,
+    eventId,
+    clientId,
+    pingUntil,
   });
+  broadcastUsers(roomId);
 }
 
 cluster.onmessage = (event: MessageEvent<ClusterMessage>) => {
   const message = event.data;
 
   if (message.type === "signal") {
-    applySignal(message.roomId, message.activeUntil);
+    applySignal(
+      message.roomId,
+      message.clientId,
+      message.pingUntil,
+      message.eventId,
+    );
     return;
   }
 
   if (message.type === "subscribe") {
-    roomFor(message.roomId).subscriptions.set(message.clientId, message.subscription);
+    roomFor(message.roomId).subscriptions.set(
+      message.clientId,
+      message.subscription,
+    );
     return;
   }
 
   if (message.type === "presence") {
     const { snapshot } = message;
     if (snapshot.instanceId === instanceId) return;
+
     let byInstance = remotePresence.get(snapshot.roomId);
     if (!byInstance) {
       byInstance = new Map();
       remotePresence.set(snapshot.roomId, byInstance);
     }
+
     byInstance.set(snapshot.instanceId, snapshot);
-    broadcastPresence(snapshot.roomId);
-    return;
-  }
 
-  if (message.type === "state-request") {
-    const room = rooms.get(message.roomId);
-    const activeUntil = room?.activeUntil ?? 0;
-    if (activeUntil > Date.now()) {
-      cluster.postMessage({
-        type: "state-response",
-        roomId: message.roomId,
-        requestId: message.requestId,
-        activeUntil,
-      } satisfies ClusterMessage);
+    const room = roomFor(snapshot.roomId);
+    for (const user of snapshot.users) {
+      if (user.pingUntil > (room.pingUntil.get(user.clientId) ?? 0)) {
+        room.pingUntil.set(user.clientId, user.pingUntil);
+      }
     }
-    return;
-  }
 
-  if (message.type === "state-response") {
-    const waiter = stateWaiters.get(message.requestId);
-    if (waiter && waiter.roomId === message.roomId) {
-      waiter.activeUntil = Math.max(waiter.activeUntil, message.activeUntil);
-    }
+    broadcastUsers(snapshot.roomId);
   }
 };
 
@@ -196,26 +229,17 @@ setInterval(() => {
   for (const roomId of rooms.keys()) publishPresence(roomId);
 }, PRESENCE_HEARTBEAT_MS);
 
-async function syncedActiveUntil(roomId: string): Promise<number> {
-  const room = roomFor(roomId);
-  const requestId = crypto.randomUUID();
-  const waiter = { roomId, activeUntil: room.activeUntil };
-  stateWaiters.set(requestId, waiter);
-
-  cluster.postMessage({ type: "state-request", roomId, requestId } satisfies ClusterMessage);
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  stateWaiters.delete(requestId);
-
-  room.activeUntil = Math.max(room.activeUntil, waiter.activeUntil);
-  return room.activeUntil > Date.now() ? room.activeUntil : 0;
-}
-
-async function sendPushes(roomId: string, room: Room, senderClientId: string) {
-  if (!pushEnabled || Date.now() < room.pushCooldownUntil) return;
-  room.pushCooldownUntil = Date.now() + PUSH_COOLDOWN_MS;
+async function sendPushes(
+  roomId: string,
+  room: Room,
+  senderClientId: string,
+  eventId: string,
+) {
+  if (!pushEnabled) return;
 
   const payload = JSON.stringify({
     type: "signal",
+    eventId,
     roomId,
     url: `/r/${roomId}`,
   });
@@ -223,6 +247,7 @@ async function sendPushes(roomId: string, room: Room, senderClientId: string) {
   await Promise.allSettled(
     [...room.subscriptions.entries()].map(async ([clientId, subscription]) => {
       if (clientId === senderClientId) return;
+
       try {
         await webpush.sendNotification(subscription, payload, {
           TTL: Math.ceil(SIGNAL_TTL_MS / 1000),
@@ -263,12 +288,7 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
   const room = roomFor(roomId);
 
   if (action === "state" && req.method === "GET") {
-    const activeUntil = await syncedActiveUntil(roomId);
-    return json({
-      active: activeUntil > Date.now(),
-      activeUntil,
-      presence: presenceCount(roomId),
-    });
+    return json({ users: mergedUsers(roomId) });
   }
 
   if (action === "events" && req.method === "GET") {
@@ -284,30 +304,23 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
           controllers = new Set();
           room.clients.set(clientId, controllers);
         }
+
         controllers.add(controller);
-        publishPresence(roomId);
-
         controller.enqueue(encoder.encode(": connected\n\n"));
-        controller.enqueue(ssePayload("presence", { count: presenceCount(roomId) }));
+        controller.enqueue(ssePayload("users", { users: mergedUsers(roomId) }));
 
-        void syncedActiveUntil(roomId).then((activeUntil) => {
-          try {
-            controller.enqueue(
-              ssePayload("state", {
-                active: activeUntil > Date.now(),
-                activeUntil,
-              }),
-            );
-          } catch {
-            controllers?.delete(controller);
-          }
-        });
+        publishPresence(roomId);
       },
       cancel() {
         if (!controllerRef) return;
+
         const controllers = room.clients.get(clientId);
         controllers?.delete(controllerRef);
-        if (controllers?.size === 0) room.clients.delete(clientId);
+
+        if (controllers?.size === 0) {
+          room.clients.delete(clientId);
+        }
+
         publishPresence(roomId);
       },
     });
@@ -324,32 +337,51 @@ async function handleApi(req: Request, url: URL): Promise<Response | null> {
 
   if (action === "signal" && req.method === "POST") {
     let body: { clientId?: string } = {};
+
     try {
       body = await req.json();
     } catch {
       // clientId is optional
     }
 
-    const activeUntil = Date.now() + SIGNAL_TTL_MS;
-    applySignal(roomId, activeUntil);
-    cluster.postMessage({ type: "signal", roomId, activeUntil } satisfies ClusterMessage);
+    const clientId = body.clientId ?? crypto.randomUUID();
+    const pingUntil = Date.now() + SIGNAL_TTL_MS;
+    const eventId = crypto.randomUUID();
 
-    void sendPushes(roomId, room, body.clientId ?? "");
-    return json({ active: true, activeUntil });
+    applySignal(roomId, clientId, pingUntil, eventId);
+
+    cluster.postMessage({
+      type: "signal",
+      roomId,
+      clientId,
+      pingUntil,
+      eventId,
+    } satisfies ClusterMessage);
+
+    publishPresence(roomId);
+    void sendPushes(roomId, room, clientId, eventId);
+
+    return json({ eventId, clientId, pingUntil });
   }
 
   if (action === "subscribe" && req.method === "POST") {
-    if (!pushEnabled) return json({ error: "push disabled" }, { status: 503 });
+    if (!pushEnabled) {
+      return json({ error: "push disabled" }, { status: 503 });
+    }
 
     const body = await req.json().catch(() => null) as
       | { clientId?: string; subscription?: PushSubscription }
       | null;
 
-    if (!body?.clientId || !body.subscription?.endpoint || !body.subscription.keys) {
+    if (
+      !body?.clientId || !body.subscription?.endpoint ||
+      !body.subscription.keys
+    ) {
       return json({ error: "invalid subscription" }, { status: 400 });
     }
 
     room.subscriptions.set(body.clientId, body.subscription);
+
     cluster.postMessage({
       type: "subscribe",
       roomId,
