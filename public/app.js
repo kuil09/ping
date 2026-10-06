@@ -44,6 +44,21 @@ function shortId(value) {
   return value.slice(0, 2).toUpperCase();
 }
 
+function updateDocumentState() {
+  const now = Date.now();
+  const total = users.length;
+  const active = users.filter((user) => user.pingUntil > now).length;
+
+  document.title = active > 0
+    ? `ping · ${active}/${total}`
+    : `ping · ${total}`;
+
+  const icon = document.querySelector('link[rel="icon"]');
+  if (icon) {
+    icon.href = active > 0 ? "/icon-active.svg" : "/icon.svg";
+  }
+}
+
 function renderUsers(nextUsers) {
   users = nextUsers;
   usersEl.replaceChildren();
@@ -67,6 +82,7 @@ function renderUsers(nextUsers) {
   }
 
   usersEl.setAttribute("aria-label", `${users.length} people in this channel`);
+  updateDocumentState();
 }
 
 function refreshUserStates() {
@@ -84,6 +100,7 @@ function refreshUserStates() {
     item.style.setProperty("--user-life", String(life));
   });
 
+  updateDocumentState();
   requestAnimationFrame(refreshUserStates);
 }
 
