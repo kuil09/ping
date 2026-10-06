@@ -16,7 +16,7 @@
 <body>
   <main>
     <header>
-      <button id="share" class="icon" aria-label="Share room" title="Share">
+      <button id="share" class="icon" aria-label="Share channel" title="Share">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4 4m-4-4L8 7M5 11v8h14v-8"/></svg>
       </button>
       <button id="notify" class="icon" aria-label="Enable notifications" title="Notifications">
@@ -25,6 +25,7 @@
     </header>
 
     <section class="stage" aria-live="polite">
+      <div id="presence" class="presence" aria-label="0 people in this channel"></div>
       <button id="signal" class="signal" aria-label="Send signal">
         <span></span>
       </button>
