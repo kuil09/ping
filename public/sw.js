@@ -1,4 +1,4 @@
-const CACHE = "ping-shell-v4";
+const CACHE = "ping-shell-v5";
 const SHELL = ["/index.html", "/styles.css", "/app.js", "/icon.svg", "/icon-active.svg", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -26,7 +26,6 @@ self.addEventListener("fetch", (event) => {
         const shell = await cache.match("/index.html");
         if (shell) return shell;
       }
-      // Never return CSS as an HTML document or JavaScript module.
       return new Response("Offline", { status: 503, headers: { "content-type": "text/plain" } });
     }
   })());
