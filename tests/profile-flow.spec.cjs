@@ -10,7 +10,9 @@ for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebK
     const browser = await engine.launch();
     const errors = [];
     try {
-      const context = await browser.newContext({ ...devices[device], colorScheme: "light" });
+      // This context injects network failures. Workers bypass page.route on WebKit.
+      // The peer and the existing end-to-end suites retain normal service workers.
+      const context = await browser.newContext({ ...devices[device], colorScheme: "light", serviceWorkers: "block" });
       const peerContext = await browser.newContext({ ...devices[device] });
       const page = await context.newPage(), peer = await peerContext.newPage(), room = fresh();
       for (const p of [page, peer]) p.on("pageerror", e => errors.push(String(e)));
@@ -27,8 +29,15 @@ for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebK
       await page.locator("#nickname").fill("   "); await page.locator("#nickname-save").click();
       await expect(page.locator("#nickname-feedback")).toHaveText("닉네임을 입력하세요.");
       await expect(page.locator("#availability-control")).toBeHidden();
-      await page.route("**/nickname", r => r.fulfill({ status: 503, json: { error: "test_failure" } }));
+      let injectedFailures = 0;
+      await page.route("**/nickname", r => {
+        injectedFailures++;
+        return r.fulfill({ status: 503, json: { error: "test_failure" } });
+      });
+      const failedResponse = page.waitForResponse(r => r.url().endsWith("/nickname") && r.request().method() === "POST");
       await page.locator("#nickname").fill("니트로"); await page.locator("#nickname-save").click();
+      expect((await failedResponse).status()).toBe(503);
+      expect(injectedFailures).toBe(1);
       await expect(page.locator("#nickname-feedback")).toContainText("저장 실패");
       await expect(page.locator("#nickname")).toHaveValue("니트로");
       await expect(page.locator("#self-profile")).toBeHidden();
@@ -89,13 +98,16 @@ for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebK
 
 test("a pending nickname cannot unlock the toggle before its confirmed application", async () => {
   const browser = await chromium.launch();
+  let release;
   try {
-    const page = await browser.newPage();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    const page = await context.newPage();
     await page.goto(`${A}/r/${fresh()}`); await expect(page.locator("#nickname")).toBeEnabled();
-    let release;
     const gate = new Promise(resolve => { release = resolve; });
-    await page.route("**/nickname", async route => { await gate; await route.continue(); });
+    let intercepted = false;
+    await page.route("**/nickname", async route => { intercepted = true; await gate; await route.continue(); });
     await page.locator("#nickname").fill("천천히"); await page.locator("#nickname-save").click();
+    await expect.poll(() => intercepted).toBe(true);
     await expect(page.locator("#nickname-form")).toHaveAttribute("aria-busy", "true");
     await expect(page.locator("#availability")).toBeDisabled();
     await expect(page.locator("#self-profile")).toBeHidden();
@@ -104,5 +116,5 @@ test("a pending nickname cannot unlock the toggle before its confirmed applicati
     await expect(page.locator("#nickname-form")).toBeHidden();
     await expect(page.locator("#availability")).toBeEnabled();
     await expect(page.locator("#availability-state")).toHaveText("불가능");
-  } finally { await browser.close(); }
+  } finally { release?.(); await browser.close(); }
 });
