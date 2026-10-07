@@ -4,7 +4,6 @@ export const HISTORY_DAYS = 30;
 const AGE = HISTORY_DAYS * 86_400_000;
 const ROOT = "ping:history:v1:";
 const KINDS = new Set(["ping", "availability", "nickname", "join", "leave", "reset"]);
-
 function validEntry(value) {
   return value && typeof value.id === "string" && value.id.length <= 512 &&
     KINDS.has(value.kind) && Number.isFinite(value.at) && value.at >= 0 &&
@@ -12,18 +11,11 @@ function validEntry(value) {
     (value.from === undefined || (typeof value.from === "string" && value.from.length <= 160)) &&
     (value.available === undefined || typeof value.available === "boolean");
 }
-
-/** One localStorage key per event avoids lost writes between independent tabs.
- * Nothing in this store is posted to the server. Storage failure never blocks the app.
- */
+/** One key per event: independent tabs cannot overwrite each other's distinct writes. */
 export class LocalHistory {
   constructor(roomId, { storage = () => globalThis.localStorage, now = () => Date.now() } = {}) {
-    this.prefix = `${ROOT}${roomId}:`;
-    this.now = now;
-    this.items = new Map();
-    this.cutoff = 0;
-    this.persistent = true;
-    this.onchange = () => {};
+    this.prefix = `${ROOT}${roomId}:`; this.now = now; this.items = new Map();
+    this.cutoff = 0; this.persistent = true; this.onchange = () => {};
     try { this.storage = storage(); if (!this.storage) throw new Error(); }
     catch { this.storage = null; this.persistent = false; }
     this.refresh();
@@ -33,7 +25,7 @@ export class LocalHistory {
     if (!this.storage) return;
     try {
       const value = Number(this.storage.getItem(`${this.prefix}cleared`));
-      if (Number.isFinite(value)) this.cutoff = Math.max(this.cutoff, value);
+      if (Number.isFinite(value) && value <= this.now() + 60_000) this.cutoff = Math.max(this.cutoff, value);
     } catch { this.persistent = false; }
   }
   refresh() {
@@ -49,53 +41,48 @@ export class LocalHistory {
           try {
             const entry = JSON.parse(raw);
             if (validEntry(entry) && key === `${this.prefix}event:${entry.id}`) loaded.set(entry.id, entry);
-          } catch { /* unrelated or damaged local data is not executable */ }
+          } catch { /* damaged data is not executable */ }
         }
         if (this.persistent) this.items = loaded;
         else for (const [id, entry] of loaded) if (!this.items.has(id)) this.items.set(id, entry);
       } catch { this.persistent = false; }
     }
-    this.prune();
-    this.notify();
+    this.prune(); this.notify();
   }
   entries() {
     const min = Math.max(this.cutoff, this.now() - AGE);
-    return [...this.items.values()].filter((entry) => entry.at > min && entry.at <= this.now() + 60_000)
+    return [...this.items.values()].filter(entry => entry.at > min && entry.at <= this.now() + 60_000)
       .sort((a, b) => b.at - a.at || b.id.localeCompare(a.id)).slice(0, HISTORY_LIMIT);
   }
   prune() {
-    const keep = new Set(this.entries().map((entry) => entry.id));
+    const keep = new Set(this.entries().map(entry => entry.id));
     for (const [id] of this.items) if (!keep.has(id)) {
       this.items.delete(id);
-      try { this.storage?.removeItem(`${this.prefix}event:${id}`); }
-      catch { this.persistent = false; }
+      try { this.storage?.removeItem(`${this.prefix}event:${id}`); } catch { this.persistent = false; }
     }
   }
   add(entry) {
     if (!validEntry(entry)) return false;
     this.readCutoff();
-    if (entry.at <= Math.max(this.cutoff, this.now() - AGE) || entry.at > this.now() + 60_000) return false;
-    if (this.items.has(entry.id)) return false;
+    if (entry.at <= Math.max(this.cutoff, this.now() - AGE) || entry.at > this.now() + 60_000 || this.items.has(entry.id)) return false;
     const key = `${this.prefix}event:${entry.id}`;
     if (this.storage) {
       try {
-        const existing = this.storage.getItem(key);
-        if (existing) {
-          const parsed = JSON.parse(existing);
-          if (validEntry(parsed)) { this.items.set(entry.id, parsed); this.notify(); return false; }
+        const raw = this.storage.getItem(key);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (validEntry(parsed) && parsed.id === entry.id) { this.items.set(entry.id, parsed); this.prune(); this.notify(); return false; }
         }
       } catch { /* damaged entry may be replaced */ }
     }
     this.items.set(entry.id, entry);
-    // Prune before writing, leaving room for the newest event when at capacity.
     this.prune();
-    try { this.storage?.setItem(key, JSON.stringify(entry)); }
-    catch { this.persistent = false; }
-    this.notify();
-    return true;
+    if (!this.items.has(entry.id)) return false;
+    try { this.storage?.setItem(key, JSON.stringify(entry)); } catch { this.persistent = false; }
+    this.notify(); return true;
   }
   clear() {
-    // A watermark prevents old SSE replay/snapshots from resurrecting erased history.
+    // Suppress pre-clear replay; remove only this app's current-channel history keys.
     this.cutoff = Math.max(this.cutoff, this.now());
     try {
       this.storage?.setItem(`${this.prefix}cleared`, String(this.cutoff));
@@ -106,29 +93,22 @@ export class LocalHistory {
       }
       for (const key of keys) this.storage.removeItem(key);
     } catch { this.persistent = false; }
-    this.items.clear();
-    this.notify();
+    this.items.clear(); this.notify();
   }
 }
-
-/** Records only observed changes. Initial membership is a baseline, not fabricated joins.
- * Exact ping times come from the server; inferred departures are marked observed.
- */
+/** Initial membership is a baseline, not fabricated joins or earlier profile actions. */
 export class HistoryTracker {
   constructor(store) { this.store = store; this.scope = null; this.previous = new Map(); }
   signal(signal, generation, users = []) {
     if (!signal?.eventId || !Number.isFinite(signal.createdAt)) return;
-    const member = users.find((user) => user.clientId === signal.clientId);
-    this.store.add({
-      id: `${generation || "unknown"}:ping:${signal.eventId}`, kind: "ping", at: signal.createdAt,
-      name: signal.nickname ?? member?.nickname ?? "", observed: false,
-    });
+    const member = users.find(user => user.clientId === signal.clientId);
+    this.store.add({ id: `${signal.generation || generation || "unknown"}:ping:${signal.eventId}`,
+      kind: "ping", at: signal.createdAt, name: signal.nickname ?? member?.nickname ?? "", observed: false });
   }
   observe(state) {
     if (!Array.isArray(state.users) || !state.epoch || !Number.isFinite(state.serverTime)) return;
     const scope = `${state.generation || "unknown"}:${state.epoch}`;
-    const current = new Map(state.users.map((user) => [user.clientId, { ...user }]));
-    // The retained replay log supplies confirmed pings, even on a page reload.
+    const current = new Map(state.users.map(user => [user.clientId, { ...user }]));
     for (const signal of state.events || []) this.signal(signal, state.generation, state.users);
     if (this.scope && this.scope !== scope) {
       this.store.add({ id: `${scope}:reset`, kind: "reset", at: state.serverTime, name: "", observed: true });
@@ -154,7 +134,6 @@ export class HistoryTracker {
           at: state.serverTime, name: before.nickname || "", observed: true });
       }
     }
-    this.scope = scope;
-    this.previous = current;
+    this.scope = scope; this.previous = current;
   }
 }
