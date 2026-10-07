@@ -3,7 +3,7 @@
   "tasks": {
     "dev": "PING_KV_URL=./ping-local.sqlite3 deno run --watch --allow-net --allow-read --allow-write --allow-env main.ts",
     "start": "deno run --allow-net --allow-read --allow-write --allow-env main.ts",
-    "check": "deno lint main.ts state.ts public/*.js tests/*_test.ts && deno check main.ts state.ts tests/*_test.ts",
+    "check": "deno lint main.ts state.ts live.ts public/*.js tests/*_test.ts && deno check main.ts state.ts live.ts tests/*_test.ts",
     "test": "deno test -A tests/*_test.ts"
   },
   "imports": {

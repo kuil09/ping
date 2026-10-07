@@ -2,22 +2,28 @@ name: Production smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      full_browser:
+        description: Explicitly run the full browser suite against fresh production channels (consumes Deno quota)
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [main]
     paths:
       - ".github/workflows/production-smoke.yml"
       - "main.ts"
+      - "live.ts"
       - "state.ts"
       - "public/**"
-      - "tests/*.spec.cjs"
-      - "playwright.config.cjs"
+      - "deno.json"
 
 permissions:
   contents: read
 
 concurrency:
   group: production-smoke
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   live:
@@ -27,45 +33,45 @@ jobs:
       PING_TEST_ORIGIN: https://ping.kuil09.deno.net
     steps:
       - uses: actions/checkout@v4
-      - name: Install isolated browser tools
-        run: |
-          npm install --no-save --package-lock=false @playwright/test@1.56.1
-          npx playwright install --with-deps chromium webkit
-          sudo apt-get install -y fonts-noto-cjk
-      - name: Wait for healthy KV and exact committed browser assets
+      - name: Bounded HTTP-only deployment verification (no SSE or browser sessions)
         run: |
           mkdir -p evidence
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import { createHash } from 'node:crypto';
           const hash = value => createHash('sha256').update(value).digest('hex');
-          const files = ['index.html', 'app.js', 'ping-sound.js', 'tab-status.js', 'profile.js', 'history.js', 'history-view.js', 'styles.css', 'history.css', 'sw.js'];
-          const expected = Object.fromEntries(files.map(file => [file, hash(fs.readFileSync('public/' + file))]));
-          let result;
-          for (let attempt = 0; attempt < 30; attempt++) {
+          let health;
+          for (let attempt = 0; attempt < 6; attempt++) {
+            const response = await fetch(process.env.PING_TEST_ORIGIN + '/api/health', { signal: AbortSignal.timeout(10000), cache: 'no-store' });
+            const body = await response.text();
+            if ([402, 403, 429].includes(response.status) || /quota exceeded|usage limit|memory.*limit/i.test(body)) {
+              throw new Error('Deployment verification stopped: platform quota/access limit (' + response.status + '). No automatic full regression or retry storm.');
+            }
             try {
-              const response = await fetch(process.env.PING_TEST_ORIGIN + '/api/health', { signal: AbortSignal.timeout(10000), cache: 'no-store' });
-              const health = await response.json();
-              if (!response.ok || !health.ok || !health.storage || health.storage !== 'deno-kv' || !health.generation || health.generation === 'local') throw new Error('KV/generation not ready');
-              const assets = {};
-              for (const [file, digest] of Object.entries(expected)) {
-                const asset = await fetch(process.env.PING_TEST_ORIGIN + '/' + file + '?smoke=' + process.env.GITHUB_SHA, { signal: AbortSignal.timeout(10000), cache: 'no-store' });
-                if (!asset.ok) throw new Error('Asset not ready: ' + file);
-                assets[file] = hash(Buffer.from(await asset.arrayBuffer()));
-                if (assets[file] !== digest) throw new Error('Waiting for committed asset: ' + file);
-              }
-              const config = await (await fetch(process.env.PING_TEST_ORIGIN + '/api/config', { cache: 'no-store' })).json();
-              if (config.defaultAvailable !== false || config.profileUi !== 'nickname-v1') throw new Error('Profile API not ready');
-              result = { health, assets, commit: process.env.GITHUB_SHA, verifiedAt: new Date().toISOString() };
-              break;
-            } catch (error) { console.log(error.message); }
-            await new Promise(resolve => setTimeout(resolve, 5000));
+              const value = JSON.parse(body);
+              if (response.ok && value.ok && value.resourceVersion === 'pooled-live-v1' && value.generation !== 'local') { health = value; break; }
+            } catch { /* deployment warming; bounded below */ }
+            await new Promise(resolve => setTimeout(resolve, 10000));
           }
-          if (!result) throw new Error('Committed production assets and KV generation did not become ready');
-          fs.writeFileSync('evidence/deployment.json', JSON.stringify(result, null, 2));
-          console.log(JSON.stringify(result));
+          if (!health) throw new Error('New resource version is not deployed; stopped after six checks');
+          const assets = {};
+          for (const file of ['index.html', 'app.js', 'ping-sound.js']) {
+            const response = await fetch(process.env.PING_TEST_ORIGIN + '/' + file, { signal: AbortSignal.timeout(10000), cache: 'no-store' });
+            if (!response.ok) throw new Error('Asset unavailable: ' + file);
+            const actual = hash(Buffer.from(await response.arrayBuffer()));
+            if (actual !== hash(fs.readFileSync('public/' + file))) throw new Error('Asset mismatch: ' + file);
+            assets[file] = actual;
+          }
+          fs.writeFileSync('evidence/deployment.json', JSON.stringify({ commit: process.env.GITHUB_SHA, health, assets, verifiedAt: new Date().toISOString(), verification: 'HTTP-only; no live browser/SSE regression' }, null, 2));
+          console.log('HTTP-only deployment check passed; full browser regression stays in CI.');
           JS
-      - name: Verify deployed profiles, history, tab flows and native soft chime playback
+      - name: Install browser tools only on explicit manual request
+        if: github.event_name == 'workflow_dispatch' && inputs.full_browser
+        run: |
+          npm install --no-save --package-lock=false @playwright/test@1.56.1
+          npx playwright install --with-deps chromium webkit
+      - name: Explicit full production regression
+        if: github.event_name == 'workflow_dispatch' && inputs.full_browser
         run: npx playwright test --config=playwright.config.cjs
       - name: Upload deployment evidence
         if: always()

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -39,7 +43,7 @@ jobs:
         run: |
           npm install --no-save --package-lock=false @playwright/test@1.56.1
           npx playwright install --with-deps chromium webkit
-      - name: Cross-process Chromium and WebKit tests
+      - name: Cross-process mobile, audio and resource regression tests
         run: npx playwright test --config=playwright.config.cjs
       - name: Upload test evidence
         if: always()

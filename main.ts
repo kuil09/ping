@@ -1,14 +1,15 @@
 import { serveDir, serveFile } from "@std/http/file-server";
 import webpush from "web-push";
-import { ApiError, deploymentGeneration, KvRooms, PRESENCE_TTL_MS, replay, ROOM_TTL_MS, type Room, SIGNAL_TTL_MS } from "./state.ts";
+import { ApiError, deploymentGeneration, KvRooms, PRESENCE_TTL_MS, ROOM_TTL_MS, SIGNAL_TTL_MS } from "./state.ts";
 import { NICKNAME_MAX_LENGTH, PROFILE_UI_VERSION } from "./public/profile.js";
+import { LiveRooms } from "./live.ts";
 
 const VERSION = "shared-kv-v2";
+const RESOURCE_VERSION = "pooled-live-v1";
 const instanceId = crypto.randomUUID();
 const generation = deploymentGeneration(Object.fromEntries(
-  ["DENO_DEPLOY", "DENO_DEPLOYMENT_ID", "DENO_DEPLOY_BUILD_ID", "DENO_TIMELINE", "PING_STATE_GENERATION"].map((name) => [name, Deno.env.get(name)]),
+  ["DENO_DEPLOY", "DENO_DEPLOYMENT_ID", "DENO_DEPLOY_BUILD_ID", "DENO_TIMELINE", "PING_STATE_GENERATION"].map(name => [name, Deno.env.get(name)]),
 ));
-const encoder = new TextEncoder();
 const publicKey = (Deno.env.get("VAPID_PUBLIC_KEY") ?? "").trim();
 const privateKey = (Deno.env.get("VAPID_PRIVATE_KEY") ?? "").trim();
 const rawSubject = (Deno.env.get("VAPID_SUBJECT") ?? "").trim();
@@ -19,23 +20,21 @@ try {
     webpush.setVapidDetails(subject, publicKey, privateKey);
     pushEnabled = true;
   }
-} catch {
-  console.error("Invalid VAPID configuration; Web Push disabled. Core signaling remains available.");
-}
+} catch { console.error("Invalid VAPID configuration; Web Push disabled. Core signaling remains available."); }
 
 let storePromise: Promise<KvRooms> | undefined;
+let live: LiveRooms | undefined;
 function getStore(): Promise<KvRooms> {
   storePromise ??= Deno.openKv(Deno.env.get("PING_KV_URL") || undefined)
-    .then((kv) => new KvRooms(kv, () => Date.now(), generation)).catch(() => {
-      storePromise = undefined;
-      throw new ApiError(503, "shared_storage_unavailable");
-    });
+    .then(kv => { const store = new KvRooms(kv, () => Date.now(), generation); live = new LiveRooms(store); return store; })
+    .catch(() => { storePromise = undefined; throw new ApiError(503, "shared_storage_unavailable"); });
   return storePromise;
 }
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: {
     "cache-control": "no-store", "x-ping-version": VERSION, "x-ping-instance": instanceId,
     "x-ping-generation": generation,
+    ...(status === 429 || status === 503 ? { "retry-after": "30" } : {}),
   } });
 }
 const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{8,80}$/.test(value);
@@ -43,13 +42,11 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
   if (!req.headers.get("content-type")?.startsWith("application/json")) throw new ApiError(415, "json_required");
   const reader = req.body?.getReader();
   if (!reader) throw new ApiError(400, "body_required");
-  let size = 0;
-  let text = "";
+  let size = 0, text = "";
   const decoder = new TextDecoder();
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done, value } = await reader.read(); if (done) break;
       size += value.length;
       if (size > 8192) { await reader.cancel(); throw new ApiError(413, "body_too_large"); }
       text += decoder.decode(value, { stream: true });
@@ -63,86 +60,14 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
   } finally { reader.releaseLock(); }
 }
 
-function events(req: Request, store: KvRooms, roomId: string) {
-  const url = new URL(req.url);
-  let cursor = req.headers.get("last-event-id") || url.searchParams.get("since");
-  let epoch = "";
-  let revision = -1;
-  let closed = false;
-  let stop: () => void = () => {};
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const reader = store.kv.watch([store.key(roomId)]).getReader();
-      const enqueue = (text: string) => {
-        if (closed) return;
-        if ((controller.desiredSize ?? 0) < -32) { stop(); return; }
-        controller.enqueue(encoder.encode(text));
-      };
-      const emit = (room: Room) => {
-        if (closed || (epoch === room.epoch && room.revision < revision)) return;
-        for (const signal of replay(room, cursor)) {
-          enqueue(`id: ${signal.eventId}\nevent: signal\ndata: ${JSON.stringify({ ...signal, generation })}\n\n`);
-        }
-        const state = store.snapshot(room);
-        cursor = state.cursor;
-        epoch = room.epoch;
-        revision = room.revision;
-        enqueue(`id: ${cursor}\nevent: users\ndata: ${JSON.stringify(state)}\n\n`);
-      };
-      let refreshing = false;
-      const refresh = async () => {
-        if (closed || refreshing) return;
-        refreshing = true;
-        try { emit(await store.read(roomId)); enqueue(": heartbeat\n\n"); }
-        catch { stop(); }
-        finally { refreshing = false; }
-      };
-      // Server output does NOT renew a user's lease. Only an incoming client heartbeat can.
-      const timer = setInterval(() => void refresh(), 5000);
-      const rotation = setTimeout(() => stop(), 180_000);
-      stop = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(timer);
-        clearTimeout(rotation);
-        req.signal.removeEventListener("abort", stop);
-        void reader.cancel().catch(() => {});
-        try { controller.close(); } catch { /* already canceled */ }
-      };
-      req.signal.addEventListener("abort", stop, { once: true });
-      enqueue("retry: 1500\n: connected\n\n");
-      if (req.signal.aborted) { stop(); return; }
-      void (async () => {
-        try {
-          while (!closed) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            const room = value[0].value as Room | null;
-            if (room) emit(room);
-          }
-        } catch { /* EventSource reconnects and replays. */ }
-        finally { stop(); }
-      })();
-    },
-    cancel() { stop(); },
-  });
-  return new Response(stream, { headers: {
-    "content-type": "text/event-stream", "cache-control": "no-cache, no-transform",
-    "x-accel-buffering": "no", "x-ping-instance": instanceId, "x-ping-version": VERSION,
-    "x-ping-generation": generation,
-  } });
-}
-
 type Subscription = { endpoint: string; keys: { p256dh: string; auth: string } };
 function validSubscription(value: unknown): value is Subscription {
   if (!value || typeof value !== "object") return false;
   const subscription = value as Subscription;
   try {
-    const url = new URL(subscription.endpoint);
-    const host = url.hostname;
+    const url = new URL(subscription.endpoint), host = url.hostname;
     const trusted = host === "fcm.googleapis.com" || host === "web.push.apple.com" ||
-      host === "updates.push.services.mozilla.com" || host.endsWith(".push.services.mozilla.com") ||
-      host.endsWith(".notify.windows.com");
+      host === "updates.push.services.mozilla.com" || host.endsWith(".push.services.mozilla.com") || host.endsWith(".notify.windows.com");
     return trusted && url.protocol === "https:" && (!url.port || url.port === "443") &&
       !url.username && !url.password && subscription.endpoint.length < 2048 &&
       typeof subscription.keys?.p256dh === "string" && /^[A-Za-z0-9_-]{87}=?$/.test(subscription.keys.p256dh) &&
@@ -157,9 +82,8 @@ async function sendPushes(store: KvRooms, roomId: string, sender: string, signal
     jobs.push(webpush.sendNotification(entry.value, JSON.stringify({ type: "signal", generation, roomId, signal, url: `/r/${roomId}` }), {
       TTL: 300, urgency: "high", timeout: 5000,
     }).catch(async (error: { statusCode?: number }) => {
-      if (error.statusCode === 404 || error.statusCode === 410) {
-        await store.kv.atomic().check(entry).delete(entry.key).commit();
-      } else { console.warn("push_delivery_failed", error.statusCode ?? "network"); }
+      if (error.statusCode === 404 || error.statusCode === 410) await store.kv.atomic().check(entry).delete(entry.key).commit();
+      else console.warn("push_delivery_failed", error.statusCode ?? "network");
     }));
   }
   await Promise.allSettled(jobs);
@@ -175,15 +99,15 @@ async function handler(req: Request): Promise<Response> {
       if (expected && expected !== generation) throw new ApiError(409, "deployment_changed");
     }
     if (url.pathname === "/api/config") return json({
-      version: VERSION, generation, storage: "deno-kv", pushEnabled,
+      version: VERSION, resourceVersion: RESOURCE_VERSION, generation, storage: "deno-kv", pushEnabled,
       profileUi: PROFILE_UI_VERSION, defaultAvailable: false, nicknameMaxLength: NICKNAME_MAX_LENGTH,
       vapidPublicKey: pushEnabled ? publicKey : null, signalTtlMs: SIGNAL_TTL_MS,
       presenceTtlMs: PRESENCE_TTL_MS, publicOrigin: Deno.env.get("PUBLIC_ORIGIN") || null,
     });
     if (url.pathname === "/api/health") {
-      const store = await getStore();
-      await store.kv.get(["ping", "health"]);
-      return json({ ok: true, version: VERSION, generation, storage: "deno-kv", instanceId });
+      const store = await getStore(); await store.kv.get(["ping", "health"]);
+      // Aggregate, per-instance counts only; no channel IDs, names or subscriptions.
+      return json({ ok: true, version: VERSION, resourceVersion: RESOURCE_VERSION, generation, storage: "deno-kv", instanceId, live: live?.stats() });
     }
     const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{3,64})\/(state|events|presence|availability|nickname|signal|subscribe)$/);
     if (match) {
@@ -191,11 +115,16 @@ async function handler(req: Request): Promise<Response> {
       const store = await getStore();
       if (req.method === "GET" && action === "state") return json(store.snapshot(await store.read(roomId)));
       if (req.method === "GET" && action === "events") {
-        const clientId = url.searchParams.get("clientId");
-        const sessionId = url.searchParams.get("sessionId");
+        const clientId = url.searchParams.get("clientId"), sessionId = url.searchParams.get("sessionId");
         if (!validId(clientId) || !validId(sessionId)) throw new ApiError(400, "reload_required");
-        await store.act(roomId, clientId, sessionId, "presence");
-        return events(req, store, roomId);
+        // Check capacity before the join writes to KV, not after.
+        const stats = live!.stats();
+        if (stats.streams >= 256) throw new ApiError(429, "live_capacity");
+        const { room } = await store.act(roomId, clientId, sessionId, "presence");
+        return live!.events(req, roomId, room, {
+          "content-type": "text/event-stream", "cache-control": "no-cache, no-transform",
+          "x-accel-buffering": "no", "x-ping-instance": instanceId, "x-ping-version": VERSION, "x-ping-generation": generation,
+        });
       }
       if (req.method !== "POST") throw new ApiError(405, "method_not_allowed");
       const body = await readBody(req);
@@ -232,10 +161,7 @@ async function handler(req: Request): Promise<Response> {
     }
     if (url.pathname.startsWith("/api/")) throw new ApiError(404, "not_found");
     if (req.method !== "GET" && req.method !== "HEAD") throw new ApiError(405, "method_not_allowed");
-    if (url.pathname === "/") {
-      const id = crypto.randomUUID().replaceAll("-", "");
-      return Response.redirect(new URL(`/r/${id}`, url), 302);
-    }
+    if (url.pathname === "/") return Response.redirect(new URL(`/r/${crypto.randomUUID().replaceAll("-", "")}`, url), 302);
     const response = /^\/r\/[A-Za-z0-9_-]{3,64}$/.test(url.pathname)
       ? await serveFile(req, "./public/index.html")
       : await serveDir(req, { fsRoot: "public", showDirListing: false, quiet: true });
@@ -250,5 +176,8 @@ async function handler(req: Request): Promise<Response> {
     return json({ error: "service_unavailable" }, 503);
   }
 }
-if (import.meta.main) Deno.serve({ port: Number(Deno.env.get("PORT") || 8000) }, handler);
+if (import.meta.main) {
+  Deno.addSignalListener("SIGINT", () => live?.close());
+  Deno.serve({ port: Number(Deno.env.get("PORT") || 8000) }, handler);
+}
 export { handler };
