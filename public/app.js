@@ -13,8 +13,6 @@ const statusEl = document.querySelector("#status");
 const availabilityButton = document.querySelector("#availability");
 const availabilityState = document.querySelector("#availability-state");
 const availabilityControl = document.querySelector("#availability-control");
-const selfProfile = document.querySelector("#self-profile");
-const profileName = document.querySelector("#profile-name");
 const nicknameForm = document.querySelector("#nickname-form");
 const nicknameInput = document.querySelector("#nickname");
 const nicknameSave = document.querySelector("#nickname-save");
@@ -195,12 +193,6 @@ function refreshNickname() {
   const hasName = named();
   const expanded = !hasName || nicknameEditing || nicknameBusy;
   nicknameForm.hidden = !expanded;
-  selfProfile.hidden = !hasName;
-  selfProfile.disabled = !ready || nicknameBusy;
-  selfProfile.setAttribute("aria-expanded", String(expanded));
-  selfProfile.setAttribute("aria-label", `${user?.nickname || "내 프로필"} · 닉네임 수정`);
-  profileName.textContent = user?.nickname || "";
-  profileName.title = user?.nickname || "";
   document.body.dataset.profileStep = !hasName ? "nickname" : expanded ? "editing" : "ready";
   nicknameLabel.textContent = hasName ? "닉네임 수정" : "닉네임으로 시작";
   nicknameHint.textContent = hasName ? "채널에 표시되는 이름 · 최대 20자" : "닉네임을 적용한 뒤 내 상태를 선택하세요.";
@@ -237,9 +229,8 @@ function cancelNickname() {
   nicknameInput.removeAttribute("aria-invalid");
   refreshNickname();
   refreshAvailability();
-  selfProfile.focus({ preventScroll: true });
+  usersEl.querySelector('.user[data-self="true"] .user-profile')?.focus({ preventScroll: true });
 }
-selfProfile.addEventListener("click", () => nicknameEditing ? cancelNickname() : editNickname());
 nicknameCancel.addEventListener("click", cancelNickname);
 usersEl.addEventListener("click", (event) => {
   if (event.target.closest(".user-profile")) editNickname();
@@ -474,7 +465,9 @@ nicknameForm.addEventListener("submit", async (event) => {
     }
     // A newer snapshot may have arrived while this response was in flight.
     if (me()?.nickname !== name) throw new Error("nickname_conflict");
-    if (visible() && nicknameForm.contains(document.activeElement)) focusTarget = firstName ? availabilityButton : selfProfile;
+    if (visible() && nicknameForm.contains(document.activeElement)) {
+      focusTarget = firstName ? availabilityButton : usersEl.querySelector('.user[data-self="true"] .user-profile');
+    }
     nicknameDirty = false;
     nicknameEditing = false;
     nicknameInput.removeAttribute("aria-invalid");
