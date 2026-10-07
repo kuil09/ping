@@ -1,9 +1,12 @@
 import { serveDir, serveFile } from "@std/http/file-server";
 import webpush from "web-push";
-import { ApiError, KvRooms, replay, ROOM_TTL_MS, roomKey, type Room, SIGNAL_TTL_MS, snapshot } from "./state.ts";
+import { ApiError, deploymentGeneration, KvRooms, PRESENCE_TTL_MS, replay, ROOM_TTL_MS, type Room, SIGNAL_TTL_MS } from "./state.ts";
 
-const VERSION = "shared-kv-v1";
+const VERSION = "shared-kv-v2";
 const instanceId = crypto.randomUUID();
+const generation = deploymentGeneration(Object.fromEntries(
+  ["DENO_DEPLOY", "DENO_DEPLOYMENT_ID", "DENO_DEPLOY_BUILD_ID", "DENO_TIMELINE", "PING_STATE_GENERATION"].map((name) => [name, Deno.env.get(name)]),
+));
 const encoder = new TextEncoder();
 const publicKey = (Deno.env.get("VAPID_PUBLIC_KEY") ?? "").trim();
 const privateKey = (Deno.env.get("VAPID_PRIVATE_KEY") ?? "").trim();
@@ -21,21 +24,19 @@ try {
 
 let storePromise: Promise<KvRooms> | undefined;
 function getStore(): Promise<KvRooms> {
-  // On Deploy, attach a managed Deno KV database. Never fall back to a Map.
   storePromise ??= Deno.openKv(Deno.env.get("PING_KV_URL") || undefined)
-    .then((kv) => new KvRooms(kv)).catch(() => {
+    .then((kv) => new KvRooms(kv, () => Date.now(), generation)).catch(() => {
       storePromise = undefined;
       throw new ApiError(503, "shared_storage_unavailable");
     });
   return storePromise;
 }
-
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: {
     "cache-control": "no-store", "x-ping-version": VERSION, "x-ping-instance": instanceId,
+    "x-ping-generation": generation,
   } });
 }
-
 const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{8,80}$/.test(value);
 async function readBody(req: Request): Promise<Record<string, unknown>> {
   if (!req.headers.get("content-type")?.startsWith("application/json")) throw new ApiError(415, "json_required");
@@ -70,7 +71,7 @@ function events(req: Request, store: KvRooms, roomId: string) {
   let stop: () => void = () => {};
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const reader = store.kv.watch([roomKey(roomId)]).getReader();
+      const reader = store.kv.watch([store.key(roomId)]).getReader();
       const enqueue = (text: string) => {
         if (closed) return;
         if ((controller.desiredSize ?? 0) < -32) { stop(); return; }
@@ -79,9 +80,9 @@ function events(req: Request, store: KvRooms, roomId: string) {
       const emit = (room: Room) => {
         if (closed || (epoch === room.epoch && room.revision < revision)) return;
         for (const signal of replay(room, cursor)) {
-          enqueue(`id: ${signal.eventId}\nevent: signal\ndata: ${JSON.stringify(signal)}\n\n`);
+          enqueue(`id: ${signal.eventId}\nevent: signal\ndata: ${JSON.stringify({ ...signal, generation })}\n\n`);
         }
-        const state = snapshot(room);
+        const state = store.snapshot(room);
         cursor = state.cursor;
         epoch = room.epoch;
         revision = room.revision;
@@ -95,7 +96,8 @@ function events(req: Request, store: KvRooms, roomId: string) {
         catch { stop(); }
         finally { refreshing = false; }
       };
-      const timer = setInterval(() => void refresh(), 10_000);
+      // Server output does NOT renew a user's lease. Only an incoming client heartbeat can.
+      const timer = setInterval(() => void refresh(), 5000);
       const rotation = setTimeout(() => stop(), 180_000);
       stop = () => {
         if (closed) return;
@@ -117,7 +119,7 @@ function events(req: Request, store: KvRooms, roomId: string) {
             const room = value[0].value as Room | null;
             if (room) emit(room);
           }
-        } catch { /* EventSource reconnects and replays from its cursor. */ }
+        } catch { /* EventSource reconnects and replays. */ }
         finally { stop(); }
       })();
     },
@@ -126,6 +128,7 @@ function events(req: Request, store: KvRooms, roomId: string) {
   return new Response(stream, { headers: {
     "content-type": "text/event-stream", "cache-control": "no-cache, no-transform",
     "x-accel-buffering": "no", "x-ping-instance": instanceId, "x-ping-version": VERSION,
+    "x-ping-generation": generation,
   } });
 }
 
@@ -145,13 +148,12 @@ function validSubscription(value: unknown): value is Subscription {
       typeof subscription.keys?.auth === "string" && /^[A-Za-z0-9_-]{22}={0,2}$/.test(subscription.keys.auth);
   } catch { return false; }
 }
-
 async function sendPushes(store: KvRooms, roomId: string, sender: string, signal: unknown) {
   if (!pushEnabled) return;
   const jobs: Promise<unknown>[] = [];
-  for await (const entry of store.kv.list<Subscription>({ prefix: ["ping", "v4", "subscription", roomId] }, { limit: 64 })) {
+  for await (const entry of store.kv.list<Subscription>({ prefix: store.subscriptionPrefix(roomId) }, { limit: 64 })) {
     if (entry.key.at(-1) === sender) continue;
-    jobs.push(webpush.sendNotification(entry.value, JSON.stringify({ type: "signal", roomId, signal, url: `/r/${roomId}` }), {
+    jobs.push(webpush.sendNotification(entry.value, JSON.stringify({ type: "signal", generation, roomId, signal, url: `/r/${roomId}` }), {
       TTL: 300, urgency: "high", timeout: 5000,
     }).catch(async (error: { statusCode?: number }) => {
       if (error.statusCode === 404 || error.statusCode === 410) {
@@ -168,22 +170,24 @@ async function handler(req: Request): Promise<Response> {
     if (req.method === "POST") {
       const origin = req.headers.get("origin");
       if (origin && origin !== url.origin) throw new ApiError(403, "origin_not_allowed");
+      const expected = req.headers.get("x-ping-generation");
+      if (expected && expected !== generation) throw new ApiError(409, "deployment_changed");
     }
     if (url.pathname === "/api/config") return json({
-      version: VERSION, storage: "deno-kv", pushEnabled,
+      version: VERSION, generation, storage: "deno-kv", pushEnabled,
       vapidPublicKey: pushEnabled ? publicKey : null, signalTtlMs: SIGNAL_TTL_MS,
-      publicOrigin: Deno.env.get("PUBLIC_ORIGIN") || null,
+      presenceTtlMs: PRESENCE_TTL_MS, publicOrigin: Deno.env.get("PUBLIC_ORIGIN") || null,
     });
     if (url.pathname === "/api/health") {
       const store = await getStore();
       await store.kv.get(["ping", "health"]);
-      return json({ ok: true, version: VERSION, storage: "deno-kv", instanceId });
+      return json({ ok: true, version: VERSION, generation, storage: "deno-kv", instanceId });
     }
-    const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{3,64})\/(state|events|presence|signal|subscribe)$/);
+    const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{3,64})\/(state|events|presence|availability|signal|subscribe)$/);
     if (match) {
       const [, roomId, action] = match;
       const store = await getStore();
-      if (req.method === "GET" && action === "state") return json(snapshot(await store.read(roomId)));
+      if (req.method === "GET" && action === "state") return json(store.snapshot(await store.read(roomId)));
       if (req.method === "GET" && action === "events") {
         const clientId = url.searchParams.get("clientId");
         const sessionId = url.searchParams.get("sessionId");
@@ -196,23 +200,27 @@ async function handler(req: Request): Promise<Response> {
       if (!validId(body.clientId) || !validId(body.sessionId)) throw new ApiError(400, "invalid_client");
       if (action === "presence") {
         const result = await store.act(roomId, body.clientId, body.sessionId, body.online === false ? "leave" : "presence");
-        return json(snapshot(result.room));
+        return json(store.snapshot(result.room));
+      }
+      if (action === "availability") {
+        if (typeof body.available !== "boolean") throw new ApiError(400, "invalid_availability");
+        const result = await store.act(roomId, body.clientId, body.sessionId, "availability", "", body.available);
+        return json(store.snapshot(result.room));
       }
       if (action === "signal") {
         if (!validId(body.requestId)) throw new ApiError(400, "request_id_required");
         const result = await store.act(roomId, body.clientId, body.sessionId, "signal", body.requestId);
-        // Persist first, then complete push dispatch before responding. No untracked background task.
         if (!result.duplicate) {
           try { await sendPushes(store, roomId, body.clientId, result.signal); }
           catch { console.warn("push_dispatch_failed"); }
         }
-        return json({ ...snapshot(result.room), signal: result.signal });
+        return json({ ...store.snapshot(result.room), signal: result.signal });
       }
       if (action === "subscribe") {
         if (!pushEnabled) throw new ApiError(503, "push_not_configured");
         if (!validSubscription(body.subscription)) throw new ApiError(400, "invalid_subscription");
-        await store.kv.set(["ping", "v4", "subscription", roomId, body.clientId], body.subscription, { expireIn: ROOM_TTL_MS });
-        return json({ ok: true });
+        await store.kv.set([...store.subscriptionPrefix(roomId), body.clientId], body.subscription, { expireIn: ROOM_TTL_MS });
+        return json({ ok: true, generation });
       }
       throw new ApiError(405, "method_not_allowed");
     }
@@ -231,11 +239,10 @@ async function handler(req: Request): Promise<Response> {
     response.headers.set("x-ping-version", VERSION);
     return response;
   } catch (error) {
-    if (error instanceof ApiError) return json({ error: error.code }, error.status);
+    if (error instanceof ApiError) return json({ error: error.code, generation }, error.status);
     console.error("request_failed", url.pathname.startsWith("/api/") ? "api" : "static");
     return json({ error: "service_unavailable" }, 503);
   }
 }
-
 if (import.meta.main) Deno.serve({ port: Number(Deno.env.get("PORT") || 8000) }, handler);
 export { handler };
