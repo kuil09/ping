@@ -13,6 +13,8 @@ type Member = {
   lastSeen: number;
   pingUntil: number;
   lastSignalAt: number;
+  // Optional for compatibility with existing v4 KV records. Default: available.
+  available?: boolean;
   sessions: { id: string; until: number }[];
 };
 
@@ -25,12 +27,16 @@ export type Signal = {
   pingUntil: number;
 };
 
+export type ChannelPing = Pick<Signal, "eventId" | "sequence" | "clientId" | "createdAt" | "pingUntil">;
+
 export type Room = {
   epoch: string;
   revision: number;
   sequence: number;
   members: Member[];
   events: Signal[];
+  // Keep the latest timestamp when the replay log is pruned; not a history UI.
+  lastPing?: ChannelPing;
 };
 
 export function roomKey(roomId: string): Deno.KvKey {
@@ -48,15 +54,22 @@ function emptyRoom(): Room {
 }
 
 export function snapshot(room: Room, now = Date.now()) {
+  const latest = room.lastPing ?? room.events.at(-1);
   return {
     epoch: room.epoch,
     revision: room.revision,
     sequence: room.sequence,
     cursor: `${room.epoch}:${room.sequence}`,
     serverTime: now,
+    channelPing: latest ? {
+      eventId: latest.eventId, sequence: latest.sequence, clientId: latest.clientId,
+      createdAt: latest.createdAt, pingUntil: latest.pingUntil,
+    } : null,
     users: room.members.filter((m) => now - m.lastSeen < ROOM_TTL_MS).map((m) => ({
       clientId: m.clientId,
       online: m.sessions.some((s) => s.until > now),
+      available: m.available !== false,
+      pingAt: m.lastSignalAt || 0,
       pingUntil: m.pingUntil > now ? m.pingUntil : 0,
       lastSeen: m.lastSeen,
     })).sort((a, b) => a.clientId.localeCompare(b.clientId)),
@@ -77,13 +90,19 @@ export class KvRooms {
     roomId: string,
     clientId: string,
     sessionId: string,
-    kind: "presence" | "leave" | "signal",
+    kind: "presence" | "leave" | "signal" | "availability",
     requestId = "",
+    available?: boolean,
   ): Promise<{ room: Room; signal: Signal | null; duplicate: boolean }> {
+    if (kind === "availability" && typeof available !== "boolean") {
+      throw new ApiError(400, "invalid_availability");
+    }
     for (let attempt = 0; attempt < 32; attempt++) {
       const entry = await this.kv.get<Room>(roomKey(roomId), { consistency: "strong" });
       const room = entry.value ?? emptyRoom();
       const now = this.now();
+      // Migrate old rooms lazily without dropping their latest ping or membership.
+      room.lastPing ??= room.events.at(-1);
       room.members = room.members.filter((m) => now - m.lastSeen < ROOM_TTL_MS);
       room.events = room.events.filter((e) => e.pingUntil > now).slice(-128);
       for (const m of room.members) m.sessions = m.sessions.filter((s) => s.until > now);
@@ -97,7 +116,7 @@ export class KvRooms {
       if (!member && kind === "leave") return { room, signal: null, duplicate: false };
       if (!member) {
         if (room.members.length >= 64) throw new ApiError(429, "channel_full");
-        member = { clientId, lastSeen: now, pingUntil: 0, lastSignalAt: 0, sessions: [] };
+        member = { clientId, lastSeen: now, pingUntil: 0, lastSignalAt: 0, available: true, sessions: [] };
         room.members.push(member);
       }
       member.sessions = member.sessions.filter((s) => s.id !== sessionId);
@@ -106,6 +125,8 @@ export class KvRooms {
         member.sessions.push({ id: sessionId, until: now + PRESENCE_TTL_MS });
         member.lastSeen = now;
       }
+      // Explicit value (not server-side flip): retrying false must stay false.
+      if (kind === "availability") member.available = available;
 
       let signal: Signal | null = null;
       if (kind === "signal") {
@@ -120,6 +141,12 @@ export class KvRooms {
           requestId,
           createdAt: now,
           pingUntil: member.pingUntil,
+        };
+        // Every NEW ping refreshes the channel clock, whoever sent it.
+        // Availability is intentionally unchanged by this action.
+        room.lastPing = {
+          eventId: signal.eventId, sequence: signal.sequence, clientId,
+          createdAt: now, pingUntil: signal.pingUntil,
         };
         room.events.push(signal);
         room.events = room.events.slice(-128);
