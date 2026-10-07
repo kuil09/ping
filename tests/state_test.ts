@@ -13,6 +13,7 @@ Deno.test("concurrent users do not overwrite each other's signals", async () => 
     const state = snapshot(await second.read("room"));
     assert.equal(state.users.length, 2);
     assert.equal(state.users.filter((u) => u.pingUntil > Date.now()).length, 2);
+    assert.ok(state.users.every((u) => u.available === false));
     assert.equal(state.sequence, 2);
     assert.equal(state.channelPing?.sequence, 2);
     assert.deepEqual(state.events.map((e) => e.sequence), [1, 2]);
@@ -58,16 +59,16 @@ Deno.test("another live tab prevents timeout; reconnect restores the user's expl
   let now = 1_000_000;
   try {
     const store = new KvRooms(kv, () => now);
-    await store.act("room", "client-alpha", "session-one", "availability", "", false);
+    await store.act("room", "client-alpha", "session-one", "availability", "", true);
     now += 30_000;
     await store.act("room", "client-alpha", "session-two", "presence");
     now += 20_000;
     assert.equal(snapshot(await store.read("room"), now).users.length, 1);
-    assert.equal(snapshot(await store.read("room"), now).users[0].available, false);
+    assert.equal(snapshot(await store.read("room"), now).users[0].available, true);
     now += 26_000;
     assert.equal(snapshot(await store.read("room"), now).users.length, 0);
     await store.act("room", "client-alpha", "session-three", "presence");
-    assert.equal(snapshot(await store.read("room"), now).users[0].available, false);
+    assert.equal(snapshot(await store.read("room"), now).users[0].available, true);
   } finally { kv.close(); }
 });
 
@@ -75,11 +76,11 @@ Deno.test("each channel has its own membership, availability and events", async 
   const kv = await Deno.openKv(":memory:");
   try {
     const store = new KvRooms(kv);
-    await store.act("one", "client-alpha", "session-one", "availability", "", false);
+    await store.act("one", "client-alpha", "session-one", "availability", "", true);
     await store.act("one", "client-alpha", "session-one", "signal", "request-one");
     await store.act("two", "client-alpha", "session-two", "presence");
     const state = snapshot(await store.read("two"));
-    assert.equal(state.users[0].available, true);
+    assert.equal(state.users[0].available, false);
     assert.equal(state.sequence, 0);
     assert.equal(state.channelPing, null);
   } finally { kv.close(); }
@@ -180,7 +181,7 @@ Deno.test("a new deployment resets rooms and subscriptions; sibling instances do
     const old = new KvRooms(kv, () => now, "deployment-a");
     const sibling = new KvRooms(kv, () => now, "deployment-a");
     const fresh = new KvRooms(kv, () => now, "deployment-b");
-    await old.act("room", "client-alpha", "session-one", "availability", "", false);
+    await old.act("room", "client-alpha", "session-one", "availability", "", true);
     await old.act("room", "client-alpha", "session-one", "signal", "request-one");
     await kv.set([...old.subscriptionPrefix("room"), "client-alpha"], { test: true }, { expireIn: ROOM_TTL_MS });
     assert.equal(snapshot(await sibling.read("room"), now).users.length, 1);
@@ -191,7 +192,7 @@ Deno.test("a new deployment resets rooms and subscriptions; sibling instances do
     assert.equal((await kv.get([...fresh.subscriptionPrefix("room"), "client-alpha"])).value, null);
     await fresh.act("room", "client-alpha", "session-new", "presence");
     state = snapshot(await fresh.read("room"), now);
-    assert.equal(state.users[0].available, true);
+    assert.equal(state.users[0].available, false);
     assert.equal(state.users[0].pingUntil, 0);
     await sibling.act("room", "client-bravo", "old-session", "signal", "old-request");
     assert.equal(snapshot(await fresh.read("room"), now).sequence, 0);

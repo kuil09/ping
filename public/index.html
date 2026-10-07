@@ -11,6 +11,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/history.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -32,11 +33,20 @@
       <button id="signal" class="signal" aria-label="핑 보내기" disabled><span></span></button>
       <div class="availability-control">
         <span class="eyebrow" id="availability-label">내 상태</span>
-        <button id="availability" class="availability" type="button" role="switch" aria-checked="true" aria-labelledby="availability-label" aria-describedby="availability-state" disabled>
+        <button id="availability" class="availability" type="button" role="switch" aria-checked="false" aria-labelledby="availability-label" aria-describedby="availability-state" disabled>
           <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
-          <span id="availability-state">가능</span>
+          <span id="availability-state">불가능</span>
         </button>
       </div>
+      <form id="nickname-form" class="nickname-form" aria-label="내 닉네임" aria-busy="false">
+        <label for="nickname" class="eyebrow">내 닉네임</label>
+        <div class="nickname-row">
+          <input id="nickname" name="nickname" type="text" placeholder="닉네임 입력" maxlength="40" autocomplete="nickname" enterkeyhint="done" spellcheck="false" aria-describedby="nickname-hint nickname-feedback" disabled>
+          <button id="nickname-save" type="submit" disabled>저장</button>
+        </div>
+        <span id="nickname-hint">최대 20자 · 미입력 시 익명</span>
+        <span id="nickname-feedback" role="status" aria-live="polite"></span>
+      </form>
       <div class="channel-members">
         <span id="member-count" class="eyebrow">연결 중</span>
         <div id="users" class="users" role="list" aria-label="현재 채널 사용자"></div>

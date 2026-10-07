@@ -9,7 +9,8 @@ on:
       - "main.ts"
       - "state.ts"
       - "public/**"
-      - "tests/mobile.spec.cjs"
+      - "tests/*.spec.cjs"
+      - "playwright.config.cjs"
 
 permissions:
   contents: read
@@ -30,20 +31,22 @@ jobs:
         run: |
           npm install --no-save --package-lock=false @playwright/test@1.56.1
           npx playwright install --with-deps chromium webkit
-      - name: Wait for healthy KV and the exact committed browser assets
+          sudo apt-get install -y fonts-noto-cjk
+      - name: Wait for healthy KV and exact committed browser assets
         run: |
           mkdir -p evidence
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import { createHash } from 'node:crypto';
           const hash = value => createHash('sha256').update(value).digest('hex');
-          const expected = Object.fromEntries(['app.js', 'tab-status.js', 'sw.js'].map(file => [file, hash(fs.readFileSync('public/' + file))]));
+          const files = ['index.html', 'app.js', 'tab-status.js', 'profile.js', 'history.js', 'history-view.js', 'styles.css', 'history.css', 'sw.js'];
+          const expected = Object.fromEntries(files.map(file => [file, hash(fs.readFileSync('public/' + file))]));
           let result;
           for (let attempt = 0; attempt < 30; attempt++) {
             try {
               const response = await fetch(process.env.PING_TEST_ORIGIN + '/api/health', { signal: AbortSignal.timeout(10000), cache: 'no-store' });
               const health = await response.json();
-              if (!response.ok || !health.ok || health.version !== 'shared-kv-v2' || health.storage !== 'deno-kv' || !health.generation || health.generation === 'local') throw new Error('KV/generation not ready');
+              if (!response.ok || !health.ok || health.storage !== 'deno-kv' || !health.generation || health.generation === 'local') throw new Error('KV/generation not ready');
               const assets = {};
               for (const [file, digest] of Object.entries(expected)) {
                 const asset = await fetch(process.env.PING_TEST_ORIGIN + '/' + file + '?smoke=' + process.env.GITHUB_SHA, { signal: AbortSignal.timeout(10000), cache: 'no-store' });
@@ -51,16 +54,18 @@ jobs:
                 assets[file] = hash(Buffer.from(await asset.arrayBuffer()));
                 if (assets[file] !== digest) throw new Error('Waiting for committed asset: ' + file);
               }
+              const config = await (await fetch(process.env.PING_TEST_ORIGIN + '/api/config', { cache: 'no-store' })).json();
+              if (config.defaultAvailable !== false || config.profileUi !== 'nickname-v1') throw new Error('Profile API not ready');
               result = { health, assets, commit: process.env.GITHUB_SHA, verifiedAt: new Date().toISOString() };
               break;
             } catch (error) { console.log(error.message); }
             await new Promise(resolve => setTimeout(resolve, 5000));
           }
-          if (!result) throw new Error('The committed production assets and KV generation did not become ready');
+          if (!result) throw new Error('Committed production assets and KV generation did not become ready');
           fs.writeFileSync('evidence/deployment.json', JSON.stringify(result, null, 2));
           console.log(JSON.stringify(result));
           JS
-      - name: Verify deployed mobile flows and hidden-tab countdown over SSE
+      - name: Verify deployed nickname, local history, mobile and hidden-tab flows
         run: npx playwright test --config=playwright.config.cjs
       - name: Upload deployment evidence
         if: always()

@@ -1,46 +1,35 @@
+import { normalizeNickname } from "./public/profile.js";
+
 export const SIGNAL_TTL_MS = 300_000;
 export const PRESENCE_TTL_MS = 45_000;
 export const ROOM_TTL_MS = 86_400_000;
-
 export class ApiError extends Error {
   constructor(public status: number, public code: string) { super(code); }
 }
-
-/** Stable across instances, different for a new deployment/configuration. Never a process UUID. */
+/** Shared by all instances of the same deployment, never a process UUID. */
 export function deploymentGeneration(env: Record<string, string | undefined>): string {
   const id = env.DENO_DEPLOYMENT_ID || env.DENO_DEPLOY_BUILD_ID;
   if (id) return `${env.DENO_TIMELINE || "deploy"}:${id}`;
   if (env.DENO_DEPLOY === "true") throw new ApiError(503, "deployment_identity_missing");
   return env.PING_STATE_GENERATION || "local";
 }
-
 type Member = {
-  clientId: string;
-  lastSeen: number;
-  pingUntil: number;
-  lastSignalAt: number;
-  available?: boolean;
+  clientId: string; lastSeen: number; pingUntil: number; lastSignalAt: number;
+  available?: boolean; nickname?: string;
+  joinedAt?: number; joinRevision?: number;
+  availableAt?: number; availableRevision?: number;
+  nicknameAt?: number; nicknameRevision?: number;
   sessions: { id: string; until: number }[];
 };
-
 export type Signal = {
-  eventId: string;
-  sequence: number;
-  clientId: string;
-  requestId: string;
-  createdAt: number;
-  pingUntil: number;
+  eventId: string; sequence: number; clientId: string; requestId: string;
+  createdAt: number; pingUntil: number; nickname?: string;
 };
-export type ChannelPing = Pick<Signal, "eventId" | "sequence" | "clientId" | "createdAt" | "pingUntil">;
+export type ChannelPing = Pick<Signal, "eventId" | "sequence" | "clientId" | "createdAt" | "pingUntil" | "nickname">;
 export type Room = {
-  epoch: string;
-  revision: number;
-  sequence: number;
-  members: Member[];
-  events: Signal[];
-  lastPing?: ChannelPing;
+  epoch: string; revision: number; sequence: number; members: Member[];
+  events: Signal[]; lastPing?: ChannelPing;
 };
-
 export function roomKey(roomId: string, generation = "local"): Deno.KvKey {
   return ["ping", "v5", generation, "room", roomId];
 }
@@ -50,57 +39,48 @@ function emptyRoom(): Room {
 function onlineUntil(member: Member) {
   return Math.max(0, ...member.sessions.map((session) => session.until));
 }
-
 export function snapshot(room: Room, now = Date.now()) {
   const latest = room.lastPing ?? room.events.at(-1);
   return {
-    epoch: room.epoch,
-    revision: room.revision,
-    sequence: room.sequence,
-    cursor: `${room.epoch}:${room.sequence}`,
-    serverTime: now,
+    epoch: room.epoch, revision: room.revision, sequence: room.sequence,
+    cursor: `${room.epoch}:${room.sequence}`, serverTime: now,
     channelPing: latest ? {
       eventId: latest.eventId, sequence: latest.sequence, clientId: latest.clientId,
-      createdAt: latest.createdAt, pingUntil: latest.pingUntil,
+      createdAt: latest.createdAt, pingUntil: latest.pingUntil, nickname: latest.nickname ?? "",
     } : null,
-    // Leases, not explicit leave events or open server-side sockets, define membership.
     users: room.members.filter((m) => onlineUntil(m) > now).map((m) => ({
-      clientId: m.clientId,
-      online: true,
-      onlineUntil: onlineUntil(m),
-      available: m.available !== false,
-      pingAt: m.lastSignalAt || 0,
-      pingUntil: m.pingUntil > now ? m.pingUntil : 0,
+      clientId: m.clientId, online: true, onlineUntil: onlineUntil(m),
+      available: m.available === true, nickname: m.nickname ?? "",
+      joinedAt: m.joinedAt || 0, joinRevision: m.joinRevision || 0,
+      availableAt: m.availableAt || 0, availableRevision: m.availableRevision || 0,
+      nicknameAt: m.nicknameAt || 0, nicknameRevision: m.nicknameRevision || 0,
+      pingAt: m.lastSignalAt || 0, pingUntil: m.pingUntil > now ? m.pingUntil : 0,
       lastSeen: m.lastSeen,
     })).sort((a, b) => a.clientId.localeCompare(b.clientId)),
     events: room.events.filter((event) => event.pingUntil > now),
   };
 }
-
-/** Each deployment gets an empty namespace; old namespaces expire without a dangerous global flush. */
+/** No long-term history table. Only live state and the existing bounded ping replay log. */
 export class KvRooms {
   constructor(public kv: Deno.Kv, private now = () => Date.now(), public generation = "local") {}
-
   key(roomId: string): Deno.KvKey { return roomKey(roomId, this.generation); }
-  subscriptionPrefix(roomId: string): Deno.KvKey {
-    return ["ping", "v5", this.generation, "subscription", roomId];
-  }
+  subscriptionPrefix(roomId: string): Deno.KvKey { return ["ping", "v5", this.generation, "subscription", roomId]; }
   snapshot(room: Room) { return { ...snapshot(room, this.now()), generation: this.generation }; }
-
   async read(roomId: string): Promise<Room> {
     const entry = await this.kv.get<Room>(this.key(roomId), { consistency: "strong" });
     return entry.value ?? emptyRoom();
   }
-
   async act(
-    roomId: string,
-    clientId: string,
-    sessionId: string,
-    kind: "presence" | "leave" | "signal" | "availability",
-    requestId = "",
-    available?: boolean,
+    roomId: string, clientId: string, sessionId: string,
+    kind: "presence" | "leave" | "signal" | "availability" | "nickname",
+    requestId = "", available?: boolean, nickname?: unknown,
   ): Promise<{ room: Room; signal: Signal | null; duplicate: boolean }> {
     if (kind === "availability" && typeof available !== "boolean") throw new ApiError(400, "invalid_availability");
+    let normalizedNickname: string | undefined;
+    if (kind === "nickname") {
+      try { normalizedNickname = normalizeNickname(nickname); }
+      catch (error) { throw new ApiError(400, error instanceof Error ? error.message : "invalid_nickname"); }
+    }
     for (let attempt = 0; attempt < 32; attempt++) {
       const entry = await this.kv.get<Room>(this.key(roomId), { consistency: "strong" });
       const room = entry.value ?? emptyRoom();
@@ -109,7 +89,6 @@ export class KvRooms {
       room.members = room.members.filter((m) => now - m.lastSeen < ROOM_TTL_MS);
       room.events = room.events.filter((e) => e.pingUntil > now).slice(-128);
       for (const m of room.members) m.sessions = m.sessions.filter((s) => s.until > now);
-
       if (kind === "signal") {
         const previous = room.events.find((e) => e.clientId === clientId && e.requestId === requestId);
         if (previous) return { room, signal: previous, duplicate: true };
@@ -122,18 +101,28 @@ export class KvRooms {
           if (!departed) throw new ApiError(429, "channel_full");
           room.members = room.members.filter((m) => m !== departed);
         }
-        member = { clientId, lastSeen: now, pingUntil: 0, lastSignalAt: 0, available: true, sessions: [] };
+        member = { clientId, lastSeen: now, pingUntil: 0, lastSignalAt: 0, available: false, nickname: "", sessions: [] };
         room.members.push(member);
       }
+      // Check before replacing this tab's lease: a heartbeat is not a new arrival.
+      const wasOnline = onlineUntil(member) > now;
       member.sessions = member.sessions.filter((s) => s.id !== sessionId);
       if (kind !== "leave") {
         if (member.sessions.length >= 8) throw new ApiError(429, "too_many_tabs");
         member.sessions.push({ id: sessionId, until: now + PRESENCE_TTL_MS });
         member.lastSeen = now;
+        if (!wasOnline) { member.joinedAt = now; member.joinRevision = room.revision + 1; }
       }
-      // Absolute value, not a flip: request retries cannot toggle it back accidentally.
-      if (kind === "availability") member.available = available;
-
+      if (kind === "availability" && (member.available === true) !== available) {
+        member.available = available;
+        member.availableAt = now;
+        member.availableRevision = room.revision + 1;
+      }
+      if (kind === "nickname" && (member.nickname || "") !== normalizedNickname) {
+        member.nickname = normalizedNickname;
+        member.nicknameAt = now;
+        member.nicknameRevision = room.revision + 1;
+      }
       let signal: Signal | null = null;
       if (kind === "signal") {
         if (now - member.lastSignalAt < 1000) throw new ApiError(429, "too_fast");
@@ -143,11 +132,11 @@ export class KvRooms {
         signal = {
           eventId: `${room.epoch}:${room.sequence}`, sequence: room.sequence,
           clientId, requestId, createdAt: now, pingUntil: member.pingUntil,
+          nickname: member.nickname || "",
         };
-        // Every NEW sender event refreshes the channel, regardless of availability or prior activity.
         room.lastPing = {
           eventId: signal.eventId, sequence: signal.sequence, clientId,
-          createdAt: now, pingUntil: signal.pingUntil,
+          createdAt: now, pingUntil: signal.pingUntil, nickname: signal.nickname,
         };
         room.events.push(signal);
         room.events = room.events.slice(-128);
@@ -162,8 +151,7 @@ export class KvRooms {
     throw new ApiError(503, "channel_busy_retry");
   }
 }
-
-/** KV watch may coalesce changes: replay from the bounded event log, not the watch count. */
+/** KV watch can coalesce changes; replay from sequence, not watch count. */
 export function replay(room: Room, cursor: string | null, now = Date.now()) {
   if (!cursor) return [];
   const split = cursor.lastIndexOf(":");

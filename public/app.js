@@ -1,4 +1,7 @@
 import { TAB_UI_VERSION, TabStatus } from "./tab-status.js";
+import { normalizeNickname, PROFILE_UI_VERSION } from "./profile.js";
+import { HISTORY_VERSION, LocalHistory, HistoryTracker } from "./history.js";
+import { attachHistory } from "./history-view.js";
 
 const roomId = location.pathname.split("/").filter(Boolean).at(-1);
 const signalButton = document.querySelector("#signal");
@@ -9,6 +12,10 @@ const usersEl = document.querySelector("#users");
 const statusEl = document.querySelector("#status");
 const availabilityButton = document.querySelector("#availability");
 const availabilityState = document.querySelector("#availability-state");
+const nicknameForm = document.querySelector("#nickname-form");
+const nicknameInput = document.querySelector("#nickname");
+const nicknameSave = document.querySelector("#nickname-save");
+const nicknameFeedback = document.querySelector("#nickname-feedback");
 const pingTime = document.querySelector("#ping-time");
 const pingAge = document.querySelector("#ping-age");
 const clockEl = document.querySelector("#ping-clock");
@@ -16,6 +23,8 @@ const memberCount = document.querySelector("#member-count");
 const timeFormat = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const tabStatus = new TabStatus();
 document.body.dataset.tabUi = TAB_UI_VERSION;
+document.body.dataset.profileUi = PROFILE_UI_VERSION;
+document.body.dataset.historyUi = HISTORY_VERSION;
 function uid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
   return Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -45,11 +54,14 @@ let pageStopped = false;
 let audioContext;
 let pendingRequestId;
 let availabilityBusy = false;
+let nicknameBusy = false;
+let nicknameDirty = false;
 let presenceBusy = false;
 let stateBusy = false;
 let renderedIds = "";
 let config = { pushEnabled: false, vapidPublicKey: null, signalTtlMs: 300000 };
 let registrationPromise;
+let activity;
 const retiredGenerations = new Set();
 const seen = new Set();
 const visible = () => document.visibilityState !== "hidden";
@@ -64,6 +76,7 @@ function transport(value) {
   signalButton.disabled = !value;
   document.body.dataset.ready = String(value);
   refreshAvailability();
+  refreshNickname();
 }
 function adoptGeneration(next) {
   if (!next || next === generation) return true;
@@ -80,6 +93,9 @@ function adoptGeneration(next) {
   tabStatus.reset();
   pendingRequestId = undefined;
   if (previous) {
+    // Deployment resets live server state, not this browser's local history.
+    if (!nicknameDirty) nicknameInput.value = "";
+    nicknameFeedback.textContent = "";
     source?.close();
     streamAlive = false;
     queueMicrotask(() => { connectEvents(); void registerPush().catch(() => {}); });
@@ -157,8 +173,17 @@ function refreshAvailability() {
   const me = users.find((user) => user.clientId === clientId);
   availabilityButton.disabled = !ready || availabilityBusy || !me;
   availabilityButton.setAttribute("aria-busy", String(availabilityBusy));
-  availabilityButton.setAttribute("aria-checked", String(me?.available !== false));
-  availabilityState.textContent = me ? (me.available !== false ? "가능" : "불가능") : "연결 중";
+  availabilityButton.setAttribute("aria-checked", String(me?.available === true));
+  availabilityState.textContent = me ? (me.available === true ? "가능" : "불가능") : "연결 중";
+}
+function refreshNickname() {
+  const me = users.find((user) => user.clientId === clientId);
+  if (me && !nicknameDirty && !nicknameBusy) nicknameInput.value = me.nickname || "";
+  nicknameInput.disabled = !ready || !me;
+  nicknameInput.readOnly = nicknameBusy;
+  nicknameSave.disabled = !ready || !me || nicknameBusy || !nicknameDirty;
+  nicknameSave.textContent = nicknameBusy ? "저장 중" : "저장";
+  nicknameForm.setAttribute("aria-busy", String(nicknameBusy));
 }
 function refreshTab() {
   if (pageStopped) return;
@@ -188,10 +213,12 @@ function drawUsers() {
     dot.className = "user-dot";
     const core = document.createElement("span");
     core.className = "user-core";
+    const name = document.createElement("bdi");
+    name.className = "user-name";
     const label = document.createElement("span");
     label.className = "user-label";
     dot.appendChild(core);
-    item.append(dot, label);
+    item.append(dot, name, label);
     usersEl.appendChild(item);
   }
   refreshDisplay();
@@ -206,13 +233,16 @@ function refreshDisplay() {
     const life = Math.min(1, Math.max(0, user.pingUntil - time) / config.signalTtlMs);
     if (life > 0) active++;
     const item = items[i];
-    const available = user.available !== false;
+    const available = user.available === true;
+    const name = user.nickname || "익명";
     item.dataset.active = String(life > 0);
     item.dataset.online = "true";
     item.dataset.available = String(available);
     item.style.setProperty("--user-life", String(life));
+    item.querySelector(".user-name").textContent = name;
+    item.querySelector(".user-name").title = name;
     item.querySelector(".user-label").textContent = `${user.clientId === clientId ? "나 · " : ""}${available ? "가능" : "불가능"}`;
-    item.setAttribute("aria-label", `${user.clientId === clientId ? "나" : "사용자"} · ${available ? "가능" : "불가능"} · 핑 ${life > 0 ? "ON" : "OFF"}`);
+    item.setAttribute("aria-label", `${name}${user.clientId === clientId ? " · 나" : ""} · ${available ? "가능" : "불가능"} · 핑 ${life > 0 ? "ON" : "OFF"}`);
   });
   const remaining = channelPing ? Math.max(0, channelPing.pingUntil - time) : 0;
   const life = Math.min(1, remaining / config.signalTtlMs);
@@ -234,10 +264,11 @@ function refreshDisplay() {
     pingAge.textContent = "아직 없음";
   }
   refreshTab();
-  const availableCount = current.filter((user) => user.available !== false).length;
+  const availableCount = current.filter((user) => user.available === true).length;
   memberCount.textContent = `${current.length}명 · ${availableCount}명 가능`;
   usersEl.setAttribute("aria-label", `${current.length}명 · ${availableCount}명 가능 · ${active}명 핑 ON`);
   refreshAvailability();
+  refreshNickname();
 }
 function acceptSignal(signal, audible = true) {
   if (!signal?.eventId || seen.has(signal.eventId)) return;
@@ -251,8 +282,8 @@ function acceptSignal(signal, audible = true) {
   if (!channelPing || signal.sequence > channelPing.sequence) channelPing = signal;
   const user = users.find((u) => u.clientId === signal.clientId);
   if (user) { user.pingUntil = Math.max(user.pingUntil, signal.pingUntil); user.pingAt = signal.createdAt; }
+  try { activity?.signal(signal, generation, users); } catch { /* history never blocks signaling */ }
   tabStatus.notice(signal, clientId, focused(), now());
-  // A ping never changes anyone's manually selected availability.
   drawUsers();
   if (audible && now() - signal.createdAt < 10000 && signal.pingUntil > now()) { alertPing(); animatePing(); }
 }
@@ -264,6 +295,7 @@ function applyState(state, fromStream = false) {
   const initial = epoch === null || epoch !== state.epoch;
   if (initial) { epoch = state.epoch; revision = -1; sequence = 0; channelPing = null; seen.clear(); tabStatus.reset(); }
   clockOffset = state.serverTime - Date.now();
+  try { activity?.observe(state); } catch { /* optional local recording */ }
   if (!initial) for (const signal of state.events || []) if (signal.sequence > sequence) acceptSignal(signal);
   users = state.users;
   channelPing = state.channelPing || null;
@@ -327,10 +359,46 @@ availabilityButton.addEventListener("click", async () => {
   availabilityBusy = true;
   refreshAvailability();
   try {
-    const state = await request(`${api}/availability`, { clientId, sessionId, available: me.available === false });
+    const state = await request(`${api}/availability`, { clientId, sessionId, available: me.available !== true });
     applyState(state);
   } catch (error) { showError(error); }
   finally { availabilityBusy = false; refreshAvailability(); }
+});
+nicknameInput.addEventListener("input", () => {
+  const me = users.find((user) => user.clientId === clientId);
+  nicknameDirty = nicknameInput.value !== (me?.nickname || "");
+  nicknameInput.removeAttribute("aria-invalid");
+  nicknameFeedback.textContent = "";
+  refreshNickname();
+});
+nicknameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.isComposing || event.keyCode === 229)) event.preventDefault();
+});
+nicknameForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!ready || nicknameBusy || !nicknameDirty) return;
+  let name;
+  try { name = normalizeNickname(nicknameInput.value); }
+  catch (error) {
+    nicknameInput.setAttribute("aria-invalid", "true");
+    nicknameFeedback.textContent = error.message === "nickname_too_long" ? "닉네임은 20자까지 입력" : "사용할 수 없는 문자가 있음";
+    return;
+  }
+  nicknameBusy = true;
+  nicknameFeedback.textContent = "";
+  refreshNickname();
+  try {
+    const state = await request(`${api}/nickname`, { clientId, sessionId, nickname: name });
+    const accepted = applyState(state);
+    if (!accepted && state.generation !== generation) {
+      const error = new Error("deployment_changed"); error.generation = state.generation; throw error;
+    }
+    nicknameDirty = false;
+    nicknameFeedback.textContent = "저장됨";
+  } catch (error) {
+    if (error.message === "deployment_changed") showError(error);
+    nicknameFeedback.textContent = "저장 실패 · 다시 시도";
+  } finally { nicknameBusy = false; refreshNickname(); }
 });
 document.addEventListener("pointerdown", unlockAudio, { passive: true });
 document.addEventListener("keydown", unlockAudio);
@@ -393,8 +461,6 @@ function resume() {
   refreshTab();
   connectEvents(); void heartbeat(); void registerPush().catch(() => {});
 }
-// An executable background tab is still connected. Only a real freeze/close stops it;
-// a suspended or disconnected device naturally loses its 45-second presence lease.
 document.addEventListener("visibilitychange", () => {
   refreshTab();
   if (visible()) { refreshDisplay(); resume(); }
@@ -409,14 +475,18 @@ document.addEventListener("freeze", () => { pageStopped = true; pause(); });
 document.addEventListener("resume", () => { pageStopped = false; resume(); });
 globalThis.addEventListener("online", resume);
 globalThis.addEventListener("offline", () => { pause(); transport(false); status("오프라인"); });
+// localStorage denial/quota/corruption is an optional-feature failure, not a transport failure.
+try {
+  const historyStore = new LocalHistory(roomId, { now });
+  activity = new HistoryTracker(historyStore);
+  attachHistory(historyStore, document.querySelector(".stage"));
+} catch { /* core controls continue even if local recording is unavailable */ }
 transport(false);
 notifyButton.hidden = true;
 connectEvents();
 void heartbeat();
 void optionalFeatures();
 setInterval(() => { if (!pageStopped && visible()) refreshDisplay(); }, 250);
-// Not requestAnimationFrame and not gated on visibility. Browsers may still throttle
-// or freeze background timers; every callback recomputes from the absolute deadline.
 setInterval(refreshTab, 1000);
 setInterval(() => void heartbeat(), 15000);
 setInterval(() => void poll(), 5000);
