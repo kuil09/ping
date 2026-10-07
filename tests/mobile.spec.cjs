@@ -1,4 +1,5 @@
 const { test, expect, chromium, webkit, devices } = require("@playwright/test");
+const { setNickname } = require("./profile-actions.cjs");
 const crypto = require("node:crypto");
 const A = process.env.PING_TEST_ORIGIN || "http://127.0.0.1:9101";
 const B = process.env.PING_TEST_ORIGIN || "http://127.0.0.1:9102";
@@ -56,7 +57,7 @@ test("mobile Chromium and WebKit: real cross-process ping and nickname sync surv
     const ha = await (await fetch(`${A}/api/health`)).json(), hb = await (await fetch(`${B}/api/health`)).json();
     expect(ha.version).toBe("shared-kv-v2"); expect(ha.generation).toBe(hb.generation);
     if (!process.env.PING_TEST_ORIGIN) expect(ha.instanceId).not.toEqual(hb.instanceId);
-    await second.locator("#nickname").fill("구름"); await second.locator("#nickname-save").click();
+    await setNickname(first, "니트로"); await setNickname(second, "구름");
     await expect(first.locator('.user[data-self="false"] .user-name')).toHaveText("구름");
     await expect(second.locator("#availability-state")).toHaveText("불가능");
     await first.locator("#signal").click();
@@ -99,6 +100,7 @@ test("same-browser availability sync and failed writes preserve the explicit cho
     const context = await browser.newContext({ ...devices["Pixel 7"] }), a = await context.newPage(), b = await context.newPage(), room = freshRoom();
     await a.goto(`${A}/r/${room}`); await b.goto(`${A}/r/${room}`); await expect(a.locator(".user")).toHaveCount(1);
     await expect(a.locator("#availability-state")).toHaveText("불가능");
+    await setNickname(a, "내 프로필"); await expect(b.locator("#nickname-form")).toBeHidden();
     await a.locator("#availability").focus(); await a.keyboard.press("Space");
     await expect(a.locator("#availability")).toHaveAttribute("aria-checked", "true"); await expect(b.locator("#availability")).toHaveAttribute("aria-checked", "true");
     await b.reload(); await expect(b.locator("#availability-state")).toHaveText("가능");
@@ -164,6 +166,7 @@ for (const [name, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
       for (const p of [receiver, sender]) p.on("pageerror", e => errors.push(String(e)));
       await Promise.all([receiver.goto(`${A}/r/${room}`), sender.goto(`${B}/r/${room}`)]);
       await expect(receiver.locator("body")).toHaveAttribute("data-tab-ui", "tab-countdown-v1"); await expect(receiver.locator(".user")).toHaveCount(2);
+      await setNickname(receiver, "수신자"); await setNickname(sender, "발신자");
       await expect(receiver.locator("#availability-state")).toHaveText("불가능"); await receiver.locator("#availability").click(); await expect(receiver.locator("#availability-state")).toHaveText("가능");
       await receiver.evaluate(() => window.__setHidden(true)); await sender.locator("#signal").click();
       await expect.poll(() => receiver.evaluate(() => window.__received.length)).toBe(1);

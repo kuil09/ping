@@ -1,13 +1,10 @@
 const { test, expect, chromium, webkit, devices } = require("@playwright/test");
+const { setNickname: name } = require("./profile-actions.cjs");
 const crypto = require("node:crypto");
 const A = process.env.PING_TEST_ORIGIN || "http://127.0.0.1:9101";
 const B = process.env.PING_TEST_ORIGIN || "http://127.0.0.1:9102";
 const fresh = () => "history_" + crypto.randomUUID().replaceAll("-", "");
 test.setTimeout(90000);
-async function name(page, value) {
-  await page.locator("#nickname").fill(value); await page.locator("#nickname-save").click();
-  await expect(page.locator("#nickname-feedback")).toHaveText("저장됨");
-}
 async function openHistory(page) {
   if (!(await page.locator("#history").getAttribute("open") !== null)) await page.locator("#history > summary").click();
 }
@@ -23,6 +20,7 @@ test("nicknames and independent opt-in availability synchronize; local timeline 
     for (const p of [a, b]) {
       await expect(p.locator(".user")).toHaveCount(2);
       await expect(p.locator("#availability")).toHaveAttribute("aria-checked", "false");
+      await expect(p.locator("#availability-control")).toBeHidden();
       await expect(p.locator("#history")).not.toHaveAttribute("open", "");
       await expect(p.locator("#nickname")).toHaveValue("");
     }
@@ -52,11 +50,13 @@ test("nicknames and independent opt-in availability synchronize; local timeline 
     const pingId = state.channelPing.eventId;
     await a.reload(); await openHistory(a);
     await expect(a.locator('.history-entry[data-kind="ping"]')).toHaveCount(2);
-    await expect(a.locator("#nickname")).toHaveValue("니트로");
+    await expect(a.locator("#nickname-form")).toBeHidden();
+    await expect(a.locator("#profile-name")).toHaveText("니트로");
     await expect(a.locator("#availability-state")).toHaveText("불가능");
     const sibling = await ca.newPage(); await sibling.goto(`${A}/r/${room}`); await openHistory(sibling);
     await expect(sibling.locator(".user")).toHaveCount(2); await expect(sibling.locator('.history-entry[data-kind="ping"]')).toHaveCount(2);
-    await name(a, "니트로 개발"); await expect(sibling.locator("#nickname")).toHaveValue("니트로 개발");
+    await name(a, "니트로 개발"); await expect(sibling.locator("#profile-name")).toHaveText("니트로 개발");
+    await expect(sibling.locator("#nickname-form")).toBeHidden();
     await expect(sibling.locator('.history-entry[data-kind="nickname"]')).toContainText(["니트로"]);
     await a.locator('[data-filter="ping"]').click(); await expect(a.locator(".history-entry")).toHaveCount(2);
     await a.locator('[data-filter="all"]').click();
@@ -73,7 +73,7 @@ test("nicknames and independent opt-in availability synchronize; local timeline 
     await expect(a.locator("#history-count")).toHaveText("0"); await expect(sibling.locator("#history-count")).toHaveText("0");
     await a.reload(); await openHistory(a); await expect(a.locator('.history-entry[data-kind="ping"]')).toHaveCount(0);
     await expect(a.locator("#ping-clock")).toHaveAttribute("data-event-id", pingId);
-    await expect(a.locator("#nickname")).toHaveValue("니트로 개발");
+    await expect(a.locator("#profile-name")).toHaveText("니트로 개발");
     await expect(b.locator('.history-entry[data-kind="ping"]')).toHaveCount(2);
     expect(errors).toEqual([]);
     await info.attach("local-history-result", { body: JSON.stringify({ freshChannel: true, initialUnavailable: true, peerNicknameSync: true, retainedPingNames: names, clearKeptChannelPing: pingId, errors }), contentType: "application/json" });
@@ -91,6 +91,7 @@ test("nickname validation and failed saves preserve confirmed peer state; markup
     await expect(b.locator('.user[data-self="false"] .user-name')).toHaveText("<b>니트로</b>");
     await expect(b.locator(".user-name b")).toHaveCount(0);
     await openHistory(b); await expect(b.locator(".history-name b")).toHaveCount(0);
+    await a.locator("#self-profile").click();
     await a.locator("#nickname").fill("가".repeat(21)); await a.locator("#nickname-save").click();
     await expect(a.locator("#nickname")).toHaveAttribute("aria-invalid", "true");
     await expect(b.locator('.user[data-self="false"] .user-name')).toHaveText("<b>니트로</b>");
@@ -100,6 +101,7 @@ test("nickname validation and failed saves preserve confirmed peer state; markup
     await expect(b.locator('.user[data-self="false"] .user-name')).toHaveText("<b>니트로</b>");
     await expect(a.locator("#availability-state")).toHaveText("불가능"); await expect(a.locator("#ping-time")).toHaveText("--:--:--");
     await a.unroute("**/nickname"); await a.locator("#nickname-save").click(); await expect(b.locator('.user[data-self="false"] .user-name')).toHaveText("수정 중");
+    await expect(a.locator("#nickname-form")).toBeHidden();
     const invalid = await fetch(`${B}/api/rooms/${room}/nickname`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: crypto.randomUUID(), sessionId: crypto.randomUUID(), nickname: { html: "bad" } }) });
     expect(invalid.status).toBe(400);
   } finally { await browser.close(); }
