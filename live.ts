@@ -62,9 +62,9 @@ class Channel {
   private room: Room;
   private closed = false;
   private reading = false;
-  private boundary: number | undefined;
-  private keepalive: number;
-  private reconcile: number;
+  private boundary: ReturnType<typeof setTimeout> | undefined;
+  private keepalive: ReturnType<typeof setInterval>;
+  private reconcile: ReturnType<typeof setInterval>;
   get size() { return this.subscribers.size; }
   constructor(private store: KvRooms, roomId: string, seed: Room, private now: () => number,
     private counters: Counts, private onClose: () => void) {
