@@ -1,3 +1,5 @@
+import { normalizeNickname } from "./public/profile.js";
+
 export const SIGNAL_TTL_MS = 300_000;
 export const PRESENCE_TTL_MS = 45_000;
 export const ROOM_TTL_MS = 86_400_000;
@@ -20,6 +22,7 @@ type Member = {
   pingUntil: number;
   lastSignalAt: number;
   available?: boolean;
+  nickname?: string;
   sessions: { id: string; until: number }[];
 };
 
@@ -68,7 +71,8 @@ export function snapshot(room: Room, now = Date.now()) {
       clientId: m.clientId,
       online: true,
       onlineUntil: onlineUntil(m),
-      available: m.available !== false,
+      available: m.available === true,
+      nickname: m.nickname ?? "",
       pingAt: m.lastSignalAt || 0,
       pingUntil: m.pingUntil > now ? m.pingUntil : 0,
       lastSeen: m.lastSeen,
@@ -96,11 +100,17 @@ export class KvRooms {
     roomId: string,
     clientId: string,
     sessionId: string,
-    kind: "presence" | "leave" | "signal" | "availability",
+    kind: "presence" | "leave" | "signal" | "availability" | "nickname",
     requestId = "",
     available?: boolean,
+    nickname?: unknown,
   ): Promise<{ room: Room; signal: Signal | null; duplicate: boolean }> {
     if (kind === "availability" && typeof available !== "boolean") throw new ApiError(400, "invalid_availability");
+    let normalizedNickname: string | undefined;
+    if (kind === "nickname") {
+      try { normalizedNickname = normalizeNickname(nickname); }
+      catch (error) { throw new ApiError(400, error instanceof Error ? error.message : "invalid_nickname"); }
+    }
     for (let attempt = 0; attempt < 32; attempt++) {
       const entry = await this.kv.get<Room>(this.key(roomId), { consistency: "strong" });
       const room = entry.value ?? emptyRoom();
@@ -122,7 +132,8 @@ export class KvRooms {
           if (!departed) throw new ApiError(429, "channel_full");
           room.members = room.members.filter((m) => m !== departed);
         }
-        member = { clientId, lastSeen: now, pingUntil: 0, lastSignalAt: 0, available: true, sessions: [] };
+        // Availability is opt-in. Nickname, presence and ping never imply consent.
+        member = { clientId, lastSeen: now, pingUntil: 0, lastSignalAt: 0, available: false, nickname: "", sessions: [] };
         room.members.push(member);
       }
       member.sessions = member.sessions.filter((s) => s.id !== sessionId);
@@ -131,8 +142,9 @@ export class KvRooms {
         member.sessions.push({ id: sessionId, until: now + PRESENCE_TTL_MS });
         member.lastSeen = now;
       }
-      // Absolute value, not a flip: request retries cannot toggle it back accidentally.
+      // Absolute values, not flips: retries cannot accidentally reverse either setting.
       if (kind === "availability") member.available = available;
+      if (kind === "nickname") member.nickname = normalizedNickname;
 
       let signal: Signal | null = null;
       if (kind === "signal") {
