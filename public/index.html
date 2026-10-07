@@ -31,26 +31,18 @@
         <span id="ping-age">아직 없음</span>
       </div>
       <button id="signal" class="signal" aria-label="핑 보내기" disabled><span></span></button>
-      <div class="profile-control">
-        <button id="self-profile" class="self-profile" type="button" aria-controls="nickname-form" aria-expanded="false" aria-label="내 프로필 · 닉네임 수정" hidden disabled>
-          <span class="profile-avatar" aria-hidden="true"></span>
-          <span class="eyebrow">나</span>
-          <bdi id="profile-name"></bdi>
-          <svg class="profile-pencil" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z"/></svg>
-        </button>
-        <form id="nickname-form" class="nickname-form" aria-label="내 닉네임" aria-busy="false" novalidate>
-          <label for="nickname" id="nickname-label" class="eyebrow">닉네임으로 시작</label>
-          <div class="nickname-row">
-            <input id="nickname" name="nickname" type="text" placeholder="닉네임 입력" maxlength="40" autocomplete="nickname" enterkeyhint="done" spellcheck="false" aria-describedby="nickname-hint nickname-feedback" required disabled>
-            <button id="nickname-save" type="submit" disabled>적용</button>
-          </div>
-          <div class="nickname-footer">
-            <span id="nickname-hint">닉네임을 적용한 뒤 내 상태를 선택하세요.</span>
-            <button id="nickname-cancel" type="button" hidden>취소</button>
-          </div>
-          <span id="nickname-feedback" role="status" aria-live="polite"></span>
-        </form>
-      </div>
+      <form id="nickname-form" class="nickname-form" aria-label="내 닉네임" aria-busy="false" novalidate>
+        <label for="nickname" id="nickname-label" class="eyebrow">닉네임으로 시작</label>
+        <div class="nickname-row">
+          <input id="nickname" name="nickname" type="text" placeholder="닉네임 입력" maxlength="40" autocomplete="nickname" enterkeyhint="done" spellcheck="false" aria-describedby="nickname-hint nickname-feedback" required disabled>
+          <button id="nickname-save" type="submit" disabled>적용</button>
+        </div>
+        <div class="nickname-footer">
+          <span id="nickname-hint">닉네임을 적용한 뒤 내 상태를 선택하세요.</span>
+          <button id="nickname-cancel" type="button" hidden>취소</button>
+        </div>
+        <span id="nickname-feedback" role="status" aria-live="polite"></span>
+      </form>
       <div id="availability-control" class="availability-control" hidden>
         <span class="eyebrow" id="availability-label">내 상태</span>
         <button id="availability" class="availability" type="button" role="switch" aria-checked="false" aria-labelledby="availability-label" aria-describedby="availability-state" disabled>
