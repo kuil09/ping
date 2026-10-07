@@ -1,60 +1,53 @@
 # ping
 
-One URL, one button, independent five-minute signals. No account, name, chat, location, or message history UI.
+One shared link, a ping button, and an explicit availability switch. No account, name, chat, or location.
 
-## Deployment prerequisite
+## Deploy
 
-**Attach a managed Deno KV database to this Deno Deploy app before deploying this branch.**
+Attach a managed Deno KV database to the app; keep `main.ts` as the entrypoint. `Deno.openKv()` uses the database attached to the active timeline. Do not configure a per-instance local SQLite database in production.
 
-In the Deno Deploy dashboard, open the app's **Databases** tab, choose **Attach Database → Provision Database → Deno KV**, and wait for the assignment to be Connected. Keep `main.ts` as the entrypoint. `Deno.openKv()` then connects to the appropriate managed database automatically; no additional database credentials belong in this repository.
+Use the same production URL and `/r/<channel-id>` on all devices. Production, branch and build-preview timelines have separate databases. Optional `PUBLIC_ORIGIN` makes the share button use a chosen production HTTPS origin.
 
-The previous process-local Map/BroadcastChannel implementation was not a valid multi-instance design for the new Deno Deploy runtime. Deploy Classic's cross-instance BroadcastChannel behavior must not be assumed on the new platform. Restart tolerance does not make isolated instances share their current state.
+## State lifecycle
 
-Reference: https://docs.deno.com/deploy/reference/runtime/
-Reference: https://docs.deno.com/deploy/reference/deno_kv/
-Reference: https://docs.deno.com/deploy/classic/api/runtime-broadcast-channel/
+Each **new deployment/configuration** starts with empty channel state. Keys are scoped by the platform's `DENO_DEPLOYMENT_ID` (falling back to `DENO_DEPLOY_BUILD_ID`) and timeline. Sibling instances share the same namespace; scaling up or restarting a process must not clear another instance's data.
 
-## Architecture
+This is a logical reset, not a global database flush. Previous namespaces are not read or migrated by the new deployment, and their records retain their 24-hour expiry. No process runs `delete everything` during startup or warm-up. VAPID secrets are environment configuration, not KV data, and are not reset.
+
+Channel membership, availability, latest ping, replay log, and server-side push subscriptions all start empty in the new namespace. Open clients rejoin and re-register existing push subscriptions automatically. **Closed clients cannot re-register until they reopen the app; after a deployment they do not receive new pushes until then.** User notification permission and the stable VAPID key need not be recreated.
+
+References:
+- https://docs.deno.com/deploy/reference/env_vars_and_contexts/
+- https://docs.deno.com/deploy/reference/deno_kv/
+- https://docs.deno.com/deploy/reference/runtime/
+
+## Three separate states
+
+- **Presence:** each page session renews a 45-second lease every 15 seconds while visible. At least one live session means one browser participant in the channel. At the lease deadline the participant disappears from the current user list and count, even if no leave beacon arrived. Server-side outgoing SSE bytes do not renew presence. Hiding a page pauses heartbeats; pagehide may send a best-effort leave beacon. A remaining live tab keeps the participant present.
+- **Availability:** the user explicitly chooses `가능` or `불가능`. This is an absolute boolean stored per channel/browser, synchronized to other devices and same-browser tabs. Pings, heartbeat, and signal expiry never flip it. Failed writes leave the last confirmed selection unchanged. New participants default to available. An expired presence is not the same as an explicit unavailable selection. Inactive membership records can preserve availability for a return within 24 hours, but are excluded from the live list and counts and may be evicted to admit new users.
+- **Ping:** every new button press, by any participant, creates a new event and refreshes the shared channel clock and five-minute expiry. This works while a prior ping is already active. The sender also has an individual five-minute ring. A departing sender is removed from membership, but the channel ping continues until its own expiry. Availability changes do not create a ping, ring an alert, or move the clock.
+
+The central button shows the shared ping fading for five minutes. Above it, the latest server-confirmed time, elapsed time and remaining lifetime are displayed. Reload and reconnect recover the same timestamp, not the page-open time. Only the most recent timestamp is shown, not a history. An expired timestamp remains marked ended until replaced or reset by a new deployment.
+
+Small participant rings show availability with a filled core or a slash plus a text label. `나` identifies the current browser. The outer ping rings remain independent of availability. Availability does not mute notifications or prevent pressing the ping button.
+
+## Transport
 
 ```
-Browser A → HTTP POST → any Deno Deploy instance → shared Deno KV
-Browser B ← SSE + replay ← another instance ← KV watch
-Background browser ← Web Push ← shared subscription records
+Browser A -> POST -> any instance -> deployment-scoped shared Deno KV
+Browser B <- SSE + replay <- another instance <- KV watch
+Background subscriber <- Web Push <- shared subscriptions in this deployment
 ```
 
-Channel membership, per-user ping expiry, and the bounded replay log are changed atomically in one channel record. A KV watch is a notification to read shared state, not an event log: it can coalesce updates, so SSE events are reconstructed from the retained sequence log. `Last-Event-ID` supports reconnecting to a different instance. Process memory holds connections only, never authoritative channel data.
+A KV watch can coalesce changes. A bounded sequence log reconstructs individual events with `Last-Event-ID`; it is not inferred from the number of watch notifications. Duplicate POST retries reuse the same request ID and do not refresh the timer again. New presses use new IDs. The replay log retains up to 128 unexpired events, not unlimited history. Each participant can send one new ping per second. Up to 64 participant records and eight concurrent tabs per browser are supported.
 
-Presence and signal state are separate:
-
-- `online`: at least one page session refreshed its 45-second lease. Visible pages send a heartbeat every 15 seconds; page hide sends a best-effort leave beacon. Multiple tabs count as one browser participant.
-- `pingUntil`: this participant's independent five-minute signal. Disconnecting does not erase the signal. Repeated pings generate new event IDs and refresh only the sender's expiry.
-- Inactive participants remain visible, dimmed, for up to 24 hours after their last visit; a ping is visually ON only until its own expiry. This is anonymous browser membership, not verified human identity.
-
-Rooms and subscriptions have a 24-hour expiry. Read-time deadlines are checked even before KV physically removes expired keys. The replay log retains at most 128 unexpired signals. A reconnect outside this retention window recovers the current snapshot, not an unlimited history. Channels are bounded to 64 browser participants and 8 simultaneous tabs per participant. Each participant can send at most one new ping per second. A retry using the same request ID is idempotent within the retained log.
-
-## Browser behavior
-
-SSE and presence start independently from service workers, notification permission, Web Push, and audio. Missing `Notification`, blocked storage, failed service-worker registration, or unavailable audio must not disable signaling. A 5-second state poll is a fallback when SSE is unavailable; mobile foreground restoration reconnects and refreshes state.
-
-The UI shows each member's ping ON/OFF separately from online/offline presence. A ping's visual strength decreases using server timestamps; the browser tab shows active/total membership and changes its favicon only when activity changes. Optional sound requires a user gesture and is never a prerequisite for POST or SSE.
-
-API responses are never cached by the service worker. Offline pages cannot send a ping and show a connection error rather than pretending delivery succeeded.
-
-## Stable URLs
-
-Use the app's **production domain** and the same `/r/<channel-id>` path on all devices. Do not mix immutable build-preview URLs, branch timelines, and production: Deno Deploy isolates databases by timeline, and origins also have separate browser storage and push subscriptions.
-
-Optionally set `PUBLIC_ORIGIN` to the production HTTPS origin to make the share button use it. Confirm the production domain in the Deno dashboard rather than guessing a build-preview URL.
+Core networking works without notification, service-worker, storage or audio APIs. Audio requires a user gesture and is optional. A five-second state poll backs up SSE. Lease deadlines are applied on reads and in the UI, without waiting for physical KV key deletion. An SSE snapshot refresh runs every five seconds, and stream rotation enables regular reconnects. Clients discard retired deployment generations and reconnect rather than merging old and new state.
 
 ## Web Push
 
-Configure a stable, generated key pair in Deploy environment variables:
+Set stable `VAPID_PUBLIC_KEY`, secret `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` (`mailto:address@example.com` or HTTPS contact URL). A bare email subject is normalized. Invalid VAPID configuration disables only Web Push, not signaling. Existing subscriptions with a different application-server key require the notification button to be used again.
 
-- `VAPID_PUBLIC_KEY`
-- `VAPID_PRIVATE_KEY` (secret; never commit or log it)
-- `VAPID_SUBJECT` (`mailto:address@example.com` or an HTTPS contact URL)
-
-A bare email subject is normalized. Invalid configuration disables only Web Push, not the app. Existing subscriptions with a different application-server key require the notification button to be used again. OS notification sound and delivery timing remain browser/OS controlled; these are not guarantees of the in-page audio implementation.
+OS notification sound and delivery timing remain browser/OS controlled. Browser automation verifies foreground signaling, not real-device background OS delivery.
 
 ## Run and test
 
@@ -64,8 +57,8 @@ deno task check
 deno task test
 ```
 
-Local development explicitly uses `./ping-local.sqlite3`. For multiple local processes, use a shared remote KV backend and set `PING_KV_URL` and `DENO_KV_ACCESS_TOKEN` for each process. Do not point distributed production instances at separate local SQLite files.
+Local development uses `./ping-local.sqlite3`. For multiple local processes use a remote KV service with `PING_KV_URL` and `DENO_KV_ACCESS_TOKEN`. `PING_STATE_GENERATION` can simulate separate deployments locally; deployed apps use the platform identity instead.
 
-CI starts a temporary `denokv` backend and two independent Deno processes, then runs Chromium and WebKit with mobile viewports. Tests cover cross-instance bidirectional signals, channel isolation, duplicate tabs, missing optional browser APIs, independent online/active states, simultaneous writes, idempotent retries, five-minute expiry, and SSE replay after switching instances. The test KV token is temporary CI-only data, not a production credential. Screenshots and server logs are retained as CI artifacts.
+CI runs unit tests and two separate Deno processes sharing a temporary KV service. Mobile Chromium/WebKit tests cover independent availability, remote/repeated clock refresh, malformed values, failed saves, missing optional APIs, multiple tabs, channel isolation, live 45-second silent-disconnect expiry, and SSE replay. Screenshots and logs are artifacts. Production smoke runs these foreground checks against a fresh, unshared production channel, never against an existing user's room.
 
-`GET /api/health` verifies KV connectivity and exposes non-secret version/instance identifiers. A passing syntax check alone is not a successful deployment or an end-to-end delivery test. Real-device background Web Push must still be verified after deployment.
+`/api/health` reports non-secret version, instance and generation identifiers and verifies KV connectivity. A passing CI run is separate from a passing production smoke run.
