@@ -12,7 +12,7 @@
 [hidden] { display: none !important; }
 html, body { margin: 0; min-height: 100%; background: var(--bg); overscroll-behavior: none; }
 button { appearance: none; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; touch-action: manipulation; }
-button:focus-visible { outline: 2px solid currentColor; outline-offset: 6px; }
+button:focus-visible, input:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; }
 button:disabled { cursor: default; opacity: .45; }
 main { position: relative; min-height: 100dvh; }
 header { position: absolute; z-index: 5; top: max(18px, env(safe-area-inset-top)); right: max(18px, env(safe-area-inset-right)); display: flex; gap: 8px; }
@@ -38,14 +38,23 @@ body.sending .signal span { transform: scale(.94); }
 .availability[aria-checked="true"] .switch-thumb { background: var(--bg); transform: translateX(14px); }
 #availability-state { min-width: 42px; font-size: 14px; font-weight: 550; }
 .availability[aria-busy="true"] { opacity: .5; }
+.nickname-form { display: flex; flex-direction: column; align-items: center; gap: 8px; width: min(100%, 300px); }
+.nickname-row { display: flex; align-items: stretch; gap: 8px; width: 100%; }
+#nickname { min-width: 0; width: 100%; height: 44px; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); border-radius: 10px; padding: 8px 12px; font: inherit; font-size: 16px; color: var(--fg); background: transparent; }
+#nickname:disabled { opacity: .5; }
+#nickname[aria-invalid="true"] { border-style: dashed; border-width: 2px; }
+#nickname-save { min-width: 60px; min-height: 44px; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); border-radius: 10px; padding: 8px 10px; font-size: 13px; white-space: nowrap; }
+#nickname-hint, #nickname-feedback { font-size: 11px; line-height: 1.4; opacity: .65; }
+#nickname-feedback { min-height: 16px; opacity: 1; }
 .channel-members { display: flex; align-items: center; flex-direction: column; gap: 18px; margin-top: 6px; width: min(100%, 420px); }
-.users { display: flex; flex-wrap: wrap; justify-content: center; gap: 18px 14px; width: 100%; min-height: 64px; }
-.user { --user-life: 0; position: relative; display: flex; align-items: center; flex-direction: column; gap: 9px; min-width: 42px; }
-.user-dot { position: relative; width: 30px; height: 30px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--fg) 45%, transparent); display: grid; place-items: center; }
+.users { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 18px 14px; width: 100%; min-height: 82px; }
+.user { --user-life: 0; position: relative; display: flex; align-items: center; flex-direction: column; gap: 7px; width: 88px; min-width: 0; }
+.user-dot { position: relative; width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--fg) 45%, transparent); display: grid; place-items: center; }
 .user-core { width: 10px; height: 10px; border-radius: 50%; background: var(--fg); }
 .user[data-available="false"] .user-core { height: 1px; width: 16px; border-radius: 0; transform: rotate(-45deg); }
 .user[data-available="false"] .user-dot { border-style: dashed; }
 .user[data-active="true"] .user-dot { box-shadow: 0 0 0 calc(5px * var(--user-life)) color-mix(in srgb, var(--fg) 9%, transparent), 0 0 0 calc(10px * var(--user-life)) color-mix(in srgb, var(--fg) 4%, transparent); }
+.user-name { font-size: 12px; font-weight: 550; line-height: 1.4; max-width: 100%; overflow-wrap: anywhere; text-align: center; }
 .user-label { font-size: 11px; white-space: nowrap; opacity: .65; }
 .user[data-self="true"] .user-label { font-weight: 650; opacity: 1; }
 #status { position: fixed; bottom: max(30px, calc(env(safe-area-inset-bottom) + 22px)); left: 16px; right: 16px; text-align: center; font-size: 12px; margin: 0; background: var(--bg); }
