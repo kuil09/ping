@@ -57,6 +57,16 @@ body.sending .signal span { transform: scale(.94); }
 .user-name { font-size: 12px; font-weight: 550; line-height: 1.4; max-width: 100%; overflow-wrap: anywhere; text-align: center; }
 .user-label { font-size: 11px; white-space: nowrap; opacity: .65; }
 .user[data-self="true"] .user-label { font-weight: 650; opacity: 1; }
+.profile-control { width: min(100%, 300px); display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.self-profile { display: flex; align-items: center; justify-content: center; gap: 9px; max-width: 100%; min-height: 44px; padding: 8px 14px; border-radius: 24px; }
+.self-profile:hover, .self-profile[aria-expanded="true"] { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.profile-avatar { width: 20px; height: 20px; border: 1px solid currentColor; border-radius: 50%; flex-shrink: 0; opacity: .6; box-shadow: inset 0 0 0 5px var(--bg); background: var(--fg); }
+#profile-name { font-size: 14px; font-weight: 550; line-height: 1.4; min-width: 0; overflow-wrap: anywhere; text-align: center; }
+.profile-pencil { width: 14px; height: 14px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; opacity: .45; }
+.nickname-footer { width: 100%; display: flex; justify-content: center; align-items: center; gap: 8px; }
+#nickname-cancel { min-width: 44px; min-height: 44px; font-size: 12px; opacity: .7; }
+.user-profile { display: flex; align-items: center; flex-direction: column; gap: 7px; width: 100%; min-height: 64px; padding: 0; border-radius: 12px; }
+.user-profile:hover .user-name { text-decoration: underline; text-underline-offset: 3px; }
 #status { position: fixed; bottom: max(30px, calc(env(safe-area-inset-bottom) + 22px)); left: 16px; right: 16px; text-align: center; font-size: 12px; margin: 0; background: var(--bg); }
 #status:empty { display: none; }
 .connection { position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); width: 5px; height: 5px; border-radius: 50%; border: 1px solid var(--muted); transform: translateX(-50%); }

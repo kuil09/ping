@@ -12,9 +12,15 @@ const usersEl = document.querySelector("#users");
 const statusEl = document.querySelector("#status");
 const availabilityButton = document.querySelector("#availability");
 const availabilityState = document.querySelector("#availability-state");
+const availabilityControl = document.querySelector("#availability-control");
+const selfProfile = document.querySelector("#self-profile");
+const profileName = document.querySelector("#profile-name");
 const nicknameForm = document.querySelector("#nickname-form");
 const nicknameInput = document.querySelector("#nickname");
 const nicknameSave = document.querySelector("#nickname-save");
+const nicknameCancel = document.querySelector("#nickname-cancel");
+const nicknameLabel = document.querySelector("#nickname-label");
+const nicknameHint = document.querySelector("#nickname-hint");
 const nicknameFeedback = document.querySelector("#nickname-feedback");
 const pingTime = document.querySelector("#ping-time");
 const pingAge = document.querySelector("#ping-age");
@@ -24,6 +30,7 @@ const timeFormat = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "
 const tabStatus = new TabStatus();
 document.body.dataset.tabUi = TAB_UI_VERSION;
 document.body.dataset.profileUi = PROFILE_UI_VERSION;
+document.body.dataset.profileFlow = "nickname-first-v1";
 document.body.dataset.historyUi = HISTORY_VERSION;
 function uid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
@@ -56,6 +63,7 @@ let pendingRequestId;
 let availabilityBusy = false;
 let nicknameBusy = false;
 let nicknameDirty = false;
+let nicknameEditing = false;
 let presenceBusy = false;
 let stateBusy = false;
 let renderedIds = "";
@@ -69,11 +77,12 @@ const focused = () => visible() && document.hasFocus();
 const now = () => Date.now() + clockOffset;
 const cursor = () => epoch ? `${epoch}:${sequence}` : null;
 const presentUsers = () => users.filter((user) => user.online && (user.onlineUntil ?? Infinity) > now());
+const me = () => users.find((user) => user.clientId === clientId);
+const named = () => Boolean(me()?.nickname?.trim());
 function status(message = "") { statusEl.textContent = message; }
 function transport(value) {
   ready = value;
   connection.classList.toggle("online", value);
-  signalButton.disabled = !value;
   document.body.dataset.ready = String(value);
   refreshAvailability();
   refreshNickname();
@@ -93,7 +102,8 @@ function adoptGeneration(next) {
   tabStatus.reset();
   pendingRequestId = undefined;
   if (previous) {
-    // Deployment resets live server state, not this browser's local history.
+    // A deployment resets the confirmed profile, never the local activity history.
+    nicknameEditing = false;
     if (!nicknameDirty) nicknameInput.value = "";
     nicknameFeedback.textContent = "";
     source?.close();
@@ -170,21 +180,70 @@ function animatePing() {
   } catch { /* animation is optional */ }
 }
 function refreshAvailability() {
-  const me = users.find((user) => user.clientId === clientId);
-  availabilityButton.disabled = !ready || availabilityBusy || !me;
+  const user = me();
+  const profileReady = named();
+  availabilityControl.hidden = !profileReady;
+  availabilityButton.disabled = !ready || availabilityBusy || !profileReady || nicknameBusy || nicknameEditing;
   availabilityButton.setAttribute("aria-busy", String(availabilityBusy));
-  availabilityButton.setAttribute("aria-checked", String(me?.available === true));
-  availabilityState.textContent = me ? (me.available === true ? "가능" : "불가능") : "연결 중";
+  availabilityButton.setAttribute("aria-checked", String(user?.available === true));
+  availabilityState.textContent = user?.available === true ? "가능" : "불가능";
+  // Reading incoming pings and recording history never depend on completing this form.
+  signalButton.disabled = !ready || !profileReady || nicknameBusy || nicknameEditing;
 }
 function refreshNickname() {
-  const me = users.find((user) => user.clientId === clientId);
-  if (me && !nicknameDirty && !nicknameBusy) nicknameInput.value = me.nickname || "";
-  nicknameInput.disabled = !ready || !me;
+  const user = me();
+  const hasName = named();
+  const expanded = !hasName || nicknameEditing || nicknameBusy;
+  nicknameForm.hidden = !expanded;
+  selfProfile.hidden = !hasName;
+  selfProfile.disabled = !ready || nicknameBusy;
+  selfProfile.setAttribute("aria-expanded", String(expanded));
+  selfProfile.setAttribute("aria-label", `${user?.nickname || "내 프로필"} · 닉네임 수정`);
+  profileName.textContent = user?.nickname || "";
+  profileName.title = user?.nickname || "";
+  document.body.dataset.profileStep = !hasName ? "nickname" : expanded ? "editing" : "ready";
+  nicknameLabel.textContent = hasName ? "닉네임 수정" : "닉네임으로 시작";
+  nicknameHint.textContent = hasName ? "채널에 표시되는 이름 · 최대 20자" : "닉네임을 적용한 뒤 내 상태를 선택하세요.";
+  nicknameCancel.hidden = !hasName;
+  nicknameCancel.disabled = nicknameBusy;
+  if (user && !nicknameDirty && !nicknameBusy) nicknameInput.value = user.nickname || "";
+  nicknameInput.disabled = !ready || !user;
   nicknameInput.readOnly = nicknameBusy;
-  nicknameSave.disabled = !ready || !me || nicknameBusy || !nicknameDirty;
-  nicknameSave.textContent = nicknameBusy ? "저장 중" : "저장";
+  nicknameSave.disabled = !ready || !user || nicknameBusy || !nicknameDirty;
+  nicknameSave.textContent = nicknameBusy ? "적용 중" : "적용";
   nicknameForm.setAttribute("aria-busy", String(nicknameBusy));
+  for (const button of usersEl.querySelectorAll(".user-profile")) {
+    button.disabled = !ready || nicknameBusy;
+    button.setAttribute("aria-expanded", String(expanded));
+  }
 }
+function editNickname() {
+  if (!ready || nicknameBusy) return;
+  nicknameEditing = true;
+  nicknameDirty = false;
+  nicknameInput.value = me()?.nickname || "";
+  nicknameFeedback.textContent = "";
+  nicknameInput.removeAttribute("aria-invalid");
+  refreshNickname();
+  refreshAvailability();
+  nicknameInput.focus({ preventScroll: true });
+  nicknameInput.select();
+}
+function cancelNickname() {
+  if (nicknameBusy || !named()) return;
+  nicknameEditing = false;
+  nicknameDirty = false;
+  nicknameFeedback.textContent = "";
+  nicknameInput.removeAttribute("aria-invalid");
+  refreshNickname();
+  refreshAvailability();
+  selfProfile.focus({ preventScroll: true });
+}
+selfProfile.addEventListener("click", () => nicknameEditing ? cancelNickname() : editNickname());
+nicknameCancel.addEventListener("click", cancelNickname);
+usersEl.addEventListener("click", (event) => {
+  if (event.target.closest(".user-profile")) editNickname();
+});
 function refreshTab() {
   if (pageStopped) return;
   const time = now();
@@ -218,7 +277,14 @@ function drawUsers() {
     const label = document.createElement("span");
     label.className = "user-label";
     dot.appendChild(core);
-    item.append(dot, name, label);
+    if (user.clientId === clientId) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "user-profile";
+      button.setAttribute("aria-controls", "nickname-form");
+      button.append(dot, name, label);
+      item.appendChild(button);
+    } else item.append(dot, name, label);
     usersEl.appendChild(item);
   }
   refreshDisplay();
@@ -243,6 +309,7 @@ function refreshDisplay() {
     item.querySelector(".user-name").title = name;
     item.querySelector(".user-label").textContent = `${user.clientId === clientId ? "나 · " : ""}${available ? "가능" : "불가능"}`;
     item.setAttribute("aria-label", `${name}${user.clientId === clientId ? " · 나" : ""} · ${available ? "가능" : "불가능"} · 핑 ${life > 0 ? "ON" : "OFF"}`);
+    item.querySelector(".user-profile")?.setAttribute("aria-label", `${name} · 내 프로필 수정`);
   });
   const remaining = channelPing ? Math.max(0, channelPing.pingUntil - time) : 0;
   const life = Math.min(1, remaining / config.signalTtlMs);
@@ -342,7 +409,7 @@ function connectEvents() {
   current.onerror = () => { if (source === current) { streamAlive = false; void poll(); } };
 }
 signalButton.addEventListener("click", async () => {
-  if (!ready || document.body.classList.contains("sending")) return;
+  if (!ready || !named() || nicknameEditing || nicknameBusy || document.body.classList.contains("sending")) return;
   unlockAudio();
   document.body.classList.add("sending");
   pendingRequestId ??= uid();
@@ -354,51 +421,74 @@ signalButton.addEventListener("click", async () => {
   finally { document.body.classList.remove("sending"); }
 });
 availabilityButton.addEventListener("click", async () => {
-  const me = users.find((user) => user.clientId === clientId);
-  if (!ready || !me || availabilityBusy) return;
+  const user = me();
+  if (!ready || !named() || nicknameEditing || nicknameBusy || availabilityBusy) return;
   availabilityBusy = true;
   refreshAvailability();
   try {
-    const state = await request(`${api}/availability`, { clientId, sessionId, available: me.available !== true });
+    const state = await request(`${api}/availability`, { clientId, sessionId, available: user.available !== true });
     applyState(state);
   } catch (error) { showError(error); }
   finally { availabilityBusy = false; refreshAvailability(); }
 });
 nicknameInput.addEventListener("input", () => {
-  const me = users.find((user) => user.clientId === clientId);
-  nicknameDirty = nicknameInput.value !== (me?.nickname || "");
+  nicknameEditing = true;
+  nicknameDirty = nicknameInput.value !== (me()?.nickname || "");
   nicknameInput.removeAttribute("aria-invalid");
   nicknameFeedback.textContent = "";
   refreshNickname();
+  refreshAvailability();
 });
 nicknameInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.isComposing || event.keyCode === 229)) event.preventDefault();
+  if (event.isComposing || event.keyCode === 229) {
+    if (event.key === "Enter") event.preventDefault();
+    return;
+  }
+  if (event.key === "Escape" && named()) { event.preventDefault(); cancelNickname(); }
 });
 nicknameForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!ready || nicknameBusy || !nicknameDirty) return;
   let name;
-  try { name = normalizeNickname(nicknameInput.value); }
-  catch (error) {
+  try {
+    name = normalizeNickname(nicknameInput.value);
+    if (!name) throw new Error("nickname_required");
+  } catch (error) {
     nicknameInput.setAttribute("aria-invalid", "true");
-    nicknameFeedback.textContent = error.message === "nickname_too_long" ? "닉네임은 20자까지 입력" : "사용할 수 없는 문자가 있음";
+    nicknameFeedback.textContent = error.message === "nickname_required" ? "닉네임을 입력하세요."
+      : error.message === "nickname_too_long" ? "닉네임은 20자까지 입력" : "사용할 수 없는 문자가 있음";
     return;
   }
+  const firstName = !named();
+  const submittedGeneration = generation;
+  let focusTarget;
   nicknameBusy = true;
   nicknameFeedback.textContent = "";
   refreshNickname();
+  refreshAvailability();
   try {
     const state = await request(`${api}/nickname`, { clientId, sessionId, nickname: name });
-    const accepted = applyState(state);
-    if (!accepted && state.generation !== generation) {
+    applyState(state);
+    if (state.generation !== generation || submittedGeneration !== generation) {
       const error = new Error("deployment_changed"); error.generation = state.generation; throw error;
     }
+    // A newer snapshot may have arrived while this response was in flight.
+    if (me()?.nickname !== name) throw new Error("nickname_conflict");
+    if (visible() && nicknameForm.contains(document.activeElement)) focusTarget = firstName ? availabilityButton : selfProfile;
     nicknameDirty = false;
+    nicknameEditing = false;
+    nicknameInput.removeAttribute("aria-invalid");
     nicknameFeedback.textContent = "저장됨";
   } catch (error) {
+    nicknameEditing = true;
     if (error.message === "deployment_changed") showError(error);
-    nicknameFeedback.textContent = "저장 실패 · 다시 시도";
-  } finally { nicknameBusy = false; refreshNickname(); }
+    nicknameFeedback.textContent = error.message === "nickname_conflict" ? "다른 탭에서 변경됨 · 다시 확인하세요." : "저장 실패 · 다시 시도";
+  } finally {
+    nicknameBusy = false;
+    refreshNickname();
+    refreshAvailability();
+    focusTarget?.focus({ preventScroll: true });
+  }
 });
 document.addEventListener("pointerdown", unlockAudio, { passive: true });
 document.addEventListener("keydown", unlockAudio);
@@ -475,7 +565,6 @@ document.addEventListener("freeze", () => { pageStopped = true; pause(); });
 document.addEventListener("resume", () => { pageStopped = false; resume(); });
 globalThis.addEventListener("online", resume);
 globalThis.addEventListener("offline", () => { pause(); transport(false); status("오프라인"); });
-// localStorage denial/quota/corruption is an optional-feature failure, not a transport failure.
 try {
   const historyStore = new LocalHistory(roomId, { now });
   activity = new HistoryTracker(historyStore);

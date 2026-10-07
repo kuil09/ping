@@ -1,4 +1,4 @@
-const CACHE = "ping-shell-v7";
+const CACHE = "ping-shell-v8";
 const SHELL = ["/index.html", "/styles.css", "/history.css", "/app.js", "/tab-status.js", "/profile.js", "/history.js", "/history-view.js", "/icon.svg", "/icon-active.svg", "/manifest.webmanifest"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
