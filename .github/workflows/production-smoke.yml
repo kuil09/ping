@@ -1,0 +1,156 @@
+name: Production smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/production-smoke.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-smoke
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PING_ORIGIN: https://ping.kuil09.deno.net
+    steps:
+      - name: Install isolated browser tools
+        run: |
+          mkdir -p /tmp/ping-smoke
+          npm install --prefix /tmp/ping-smoke --no-save --package-lock=false playwright@1.56.1
+          /tmp/ping-smoke/node_modules/.bin/playwright install --with-deps chromium webkit
+      - name: Verify deployed health and mobile signaling
+        run: |
+          mkdir -p evidence
+          cat > /tmp/ping-smoke/check.cjs <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const { chromium, webkit, devices } = require('playwright');
+          const origin = process.env.PING_ORIGIN;
+          // Use only a fresh, unshared channel: never notify existing participants.
+          const room = 'smoke_' + crypto.randomUUID().replaceAll('-', '');
+          const result = { origin, version: 'shared-kv-v1', startedAt: new Date().toISOString(), checks: [], errors: [] };
+          const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(predicate, timeout = 15000) {
+            const deadline = Date.now() + timeout;
+            while (Date.now() < deadline) {
+              if (await predicate()) return;
+              await pause(150);
+            }
+            throw new Error('Timed out waiting for live state');
+          }
+          async function get(path) {
+            const response = await fetch(origin + path, { signal: AbortSignal.timeout(10000), cache: 'no-store' });
+            assert.equal(response.status, 200, path + ' status');
+            return response.json();
+          }
+          async function main() {
+            let healthy = false;
+            for (let attempt = 0; attempt < 18; attempt++) {
+              try {
+                const health = await get('/api/health');
+                assert.equal(health.ok, true);
+                assert.equal(health.storage, 'deno-kv');
+                assert.equal(health.version, result.version);
+                result.health = health;
+                healthy = true;
+                break;
+              } catch (error) {
+                console.log('Waiting for deployment:', error.message);
+                await pause(5000);
+              }
+            }
+            assert.equal(healthy, true, 'deployed shared KV health');
+            result.checks.push('production health: shared-kv-v1 + deno-kv');
+            const config = await get('/api/config');
+            result.pushConfigured = config.pushEnabled === true;
+            const browsers = [];
+            try {
+              const chrome = await chromium.launch(); browsers.push(chrome);
+              const safari = await webkit.launch(); browsers.push(safari);
+              const a = await chrome.newContext({ ...devices['Pixel 7'] });
+              const b = await safari.newContext({ ...devices['iPhone 13'] });
+              for (const context of [a, b]) {
+                await context.addInitScript(() => {
+                  // Observe real EventSource delivery without replacing transport.
+                  window.__smokeSignals = [];
+                  const Native = window.EventSource;
+                  const Observed = function(...args) {
+                    const source = new Native(...args);
+                    source.addEventListener('signal', e => window.__smokeSignals.push(JSON.parse(e.data)));
+                    return source;
+                  };
+                  Object.setPrototypeOf(Observed, Native);
+                  Observed.prototype = Native.prototype;
+                  window.EventSource = Observed;
+                });
+              }
+              const first = await a.newPage();
+              const second = await b.newPage();
+              for (const page of [first, second]) page.on('pageerror', error => result.errors.push(String(error)));
+              await Promise.all([first.goto(origin + '/r/' + room), second.goto(origin + '/r/' + room)]);
+              await until(async () => (await first.locator('.user').count()) === 2 && (await second.locator('.user').count()) === 2);
+              result.checks.push('two independent mobile browsers display both participants');
+              let start = Date.now();
+              await first.locator('#signal').click();
+              await until(async () => (await second.locator('.user[data-active="true"]').count()) === 1 && await second.evaluate(() => window.__smokeSignals.length >= 1));
+              result.chromiumToWebkitMs = Date.now() - start;
+              start = Date.now();
+              await second.locator('#signal').click();
+              await until(async () => (await first.locator('.user[data-active="true"]').count()) === 2 && (await second.locator('.user[data-active="true"]').count()) === 2 && await first.evaluate(() => window.__smokeSignals.length >= 2));
+              result.webkitToChromiumMs = Date.now() - start;
+              assert.equal(await first.title(), 'ping · 2/2');
+              assert.equal(await second.title(), 'ping · 2/2');
+              result.checks.push('bidirectional pings arrive through SSE; separate ON states and tab title');
+              await until(async () => !(await first.locator('body').getAttribute('class') || '').includes('sending'));
+              await pause(1200);
+              const received = await second.evaluate(() => window.__smokeSignals.length);
+              await first.locator('#signal').click();
+              await until(async () => await second.evaluate(n => window.__smokeSignals.length > n, received));
+              const ids = await second.evaluate(() => window.__smokeSignals.map(s => s.eventId));
+              assert.equal(new Set(ids).size, ids.length, 'no duplicate SSE events');
+              result.checks.push('repeated ping delivers a distinct event while already ON');
+              const tab = await a.newPage();
+              await tab.goto(origin + '/r/' + room);
+              await until(async () => (await tab.locator('.user').count()) === 2);
+              await tab.close();
+              result.checks.push('same-browser tabs count as one participant');
+              await first.screenshot({ path: 'evidence/chromium.png', fullPage: true });
+              await second.screenshot({ path: 'evidence/webkit.png', fullPage: true });
+              const state = await get('/api/rooms/' + room + '/state');
+              assert.equal(state.users.length, 2);
+              assert.equal(state.users.filter(u => u.pingUntil > state.serverTime).length, 2);
+              result.checks.push('shared server snapshot matches both browser UIs');
+              await second.goto('about:blank');
+              await until(async () => (await first.locator('.user[data-online="false"]').count()) === 1, 65000);
+              assert.equal(await first.locator('.user[data-active="true"]').count(), 2);
+              result.checks.push('leaving changes presence without clearing the five-minute signal');
+              assert.deepEqual(result.errors, [], 'no uncaught browser errors');
+            } finally {
+              for (const browser of browsers) await browser.close();
+            }
+          }
+          main().then(() => { result.ok = true; }).catch(error => {
+            result.ok = false; result.failure = String(error.stack || error); process.exitCode = 1;
+          }).finally(() => {
+            result.finishedAt = new Date().toISOString();
+            fs.writeFileSync('evidence/result.json', JSON.stringify(result, null, 2));
+            console.log(JSON.stringify(result, null, 2));
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Production smoke\n\n```json\n' + JSON.stringify(result, null, 2) + '\n```\n');
+          });
+          JS
+          node /tmp/ping-smoke/check.cjs
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-smoke-evidence
+          path: evidence/
+          retention-days: 7
