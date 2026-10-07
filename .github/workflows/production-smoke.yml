@@ -30,25 +30,37 @@ jobs:
         run: |
           npm install --no-save --package-lock=false @playwright/test@1.56.1
           npx playwright install --with-deps chromium webkit
-      - name: Wait for deployed shared-kv-v2 and verify its generation
+      - name: Wait for healthy KV and the exact committed browser assets
         run: |
           mkdir -p evidence
           node --input-type=module <<'JS'
           import fs from 'node:fs';
-          let health;
+          import { createHash } from 'node:crypto';
+          const hash = value => createHash('sha256').update(value).digest('hex');
+          const expected = Object.fromEntries(['app.js', 'tab-status.js', 'sw.js'].map(file => [file, hash(fs.readFileSync('public/' + file))]));
+          let result;
           for (let attempt = 0; attempt < 30; attempt++) {
             try {
               const response = await fetch(process.env.PING_TEST_ORIGIN + '/api/health', { signal: AbortSignal.timeout(10000), cache: 'no-store' });
-              const value = await response.json();
-              if (response.ok && value.ok && value.version === 'shared-kv-v2' && value.storage === 'deno-kv' && value.generation && value.generation !== 'local') { health = value; break; }
-            } catch { /* wait for deployment */ }
+              const health = await response.json();
+              if (!response.ok || !health.ok || health.version !== 'shared-kv-v2' || health.storage !== 'deno-kv' || !health.generation || health.generation === 'local') throw new Error('KV/generation not ready');
+              const assets = {};
+              for (const [file, digest] of Object.entries(expected)) {
+                const asset = await fetch(process.env.PING_TEST_ORIGIN + '/' + file + '?smoke=' + process.env.GITHUB_SHA, { signal: AbortSignal.timeout(10000), cache: 'no-store' });
+                if (!asset.ok) throw new Error('Asset not ready: ' + file);
+                assets[file] = hash(Buffer.from(await asset.arrayBuffer()));
+                if (assets[file] !== digest) throw new Error('Waiting for committed asset: ' + file);
+              }
+              result = { health, assets, commit: process.env.GITHUB_SHA, verifiedAt: new Date().toISOString() };
+              break;
+            } catch (error) { console.log(error.message); }
             await new Promise(resolve => setTimeout(resolve, 5000));
           }
-          if (!health) throw new Error('New deployment/generation did not become healthy');
-          fs.writeFileSync('evidence/health.json', JSON.stringify(health, null, 2));
-          console.log(JSON.stringify(health));
+          if (!result) throw new Error('The committed production assets and KV generation did not become ready');
+          fs.writeFileSync('evidence/deployment.json', JSON.stringify(result, null, 2));
+          console.log(JSON.stringify(result));
           JS
-      - name: Verify deployed clock, toggle, lease expiry and mobile signaling
+      - name: Verify deployed mobile flows and hidden-tab countdown over SSE
         run: npx playwright test --config=playwright.config.cjs
       - name: Upload deployment evidence
         if: always()
