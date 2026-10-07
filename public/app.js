@@ -2,6 +2,7 @@ import { TAB_UI_VERSION, TabStatus } from "./tab-status.js";
 import { normalizeNickname, PROFILE_UI_VERSION } from "./profile.js";
 import { HISTORY_VERSION, LocalHistory, HistoryTracker } from "./history.js";
 import { attachHistory } from "./history-view.js";
+import { PingSound, PING_SOUND_VERSION } from "./ping-sound.js";
 
 const roomId = location.pathname.split("/").filter(Boolean).at(-1);
 const signalButton = document.querySelector("#signal");
@@ -26,6 +27,8 @@ const clockEl = document.querySelector("#ping-clock");
 const memberCount = document.querySelector("#member-count");
 const timeFormat = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const tabStatus = new TabStatus();
+const pingSound = new PingSound();
+document.body.dataset.soundUi = PING_SOUND_VERSION;
 document.body.dataset.tabUi = TAB_UI_VERSION;
 document.body.dataset.profileUi = PROFILE_UI_VERSION;
 document.body.dataset.profileFlow = "nickname-first-v1";
@@ -56,7 +59,6 @@ let streamAlive = false;
 let lastStreamAt = 0;
 let ready = false;
 let pageStopped = false;
-let audioContext;
 let pendingRequestId;
 let availabilityBusy = false;
 let nicknameBusy = false;
@@ -98,6 +100,7 @@ function adoptGeneration(next) {
   users = [];
   seen.clear();
   tabStatus.reset();
+  pingSound.stop();
   pendingRequestId = undefined;
   if (previous) {
     // A deployment resets the confirmed profile, never the local activity history.
@@ -140,36 +143,11 @@ async function request(path, body) {
     return value;
   } finally { clearTimeout(timer); }
 }
-function unlockAudio() {
-  try {
-    const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
-    if (!Audio) return;
-    audioContext ??= new Audio();
-    if (audioContext.state === "suspended") void audioContext.resume().catch(() => {});
-  } catch { /* optional feature */ }
-}
+function unlockAudio() { pingSound.unlock(); }
 function alertPing() {
-  try {
-    if (!visible()) return;
-    navigator.vibrate?.([25, 25, 45]);
-  } catch { /* optional */ }
-  try {
-    if (!visible() || audioContext?.state !== "running") return;
-    const start = audioContext.currentTime;
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(920, start);
-    oscillator.frequency.exponentialRampToValueAtTime(460, start + .48);
-    gain.gain.setValueAtTime(.0001, start);
-    gain.gain.exponentialRampToValueAtTime(.14, start + .02);
-    gain.gain.exponentialRampToValueAtTime(.0001, start + .62);
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-    oscillator.start(start);
-    oscillator.stop(start + .64);
-  } catch { /* sound never blocks state or transport */ }
+  if (!visible()) return;
+  try { navigator.vibrate?.([25, 25, 45]); } catch { /* optional */ }
+  pingSound.play();
 }
 function animatePing() {
   try {
@@ -531,7 +509,7 @@ async function optionalFeatures() {
     void registerPush().catch(() => {});
   } catch { notifyButton.hidden = true; }
 }
-function pause() { source?.close(); source = undefined; streamAlive = false; }
+function pause() { pingSound.stop(); source?.close(); source = undefined; streamAlive = false; }
 function leave() {
   pageStopped = true;
   pause();
@@ -545,6 +523,7 @@ function resume() {
   connectEvents(); void heartbeat(); void registerPush().catch(() => {});
 }
 document.addEventListener("visibilitychange", () => {
+  if (!visible()) pingSound.stop();
   refreshTab();
   if (visible()) { refreshDisplay(); resume(); }
 });
