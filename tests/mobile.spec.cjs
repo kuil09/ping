@@ -109,7 +109,7 @@ test("mobile Chromium and WebKit: remote pings refresh the clock, not explicit a
     await expect(second.locator("#ping-time")).toHaveAttribute("data-created-at", after);
     await expect(second.locator("#availability-state")).toHaveText("불가능");
     await expect(first.locator('.user[data-self="false"]')).toHaveAttribute("data-available", "false");
-    await expect(second).toHaveTitle("ping · 2/2");
+    await expect(second).toHaveTitle(/^(?:05:00|04:\d{2}) · ping · 2\/2명$/);
 
     await first.waitForTimeout(1300);
     await first.locator("#signal").click();
@@ -186,7 +186,7 @@ test("silent disconnect without a leave beacon expires in 45 seconds while the s
     await post(B, room, "signal", { ...ghost, requestId: crypto.randomUUID() });
     await expect(page.locator(".user")).toHaveCount(2);
     const time = await page.locator("#ping-time").getAttribute("data-created-at");
-    await stream.close(); // No presence(false), pagehide, or subsequent heartbeat.
+    await stream.close();
     await expect(page.locator(".user")).toHaveCount(1, { timeout: 55000 });
     await expect(page.locator("#ping-time")).toHaveAttribute("data-created-at", time);
     await expect(page.locator("#ping-clock")).toHaveAttribute("data-active", "true");
@@ -217,3 +217,91 @@ test("Last-Event-ID replays missed pings after reconnecting to another instance"
     expect(new Set(reconnected.events.filter((event) => event.type === "signal").map((event) => event.data.eventId)).size).toBe(2);
   } finally { await reconnected.close(); }
 });
+
+for (const [name, engine] of [["Chromium", chromium], ["WebKit", webkit]]) {
+  test(`${name}: hidden-tab lifecycle keeps real SSE, countdown, attention and renewals`, async ({}, info) => {
+    const browser = await engine.launch();
+    const errors = [];
+    try {
+      const receiverContext = await browser.newContext();
+      const senderContext = await browser.newContext();
+      await receiverContext.addInitScript(() => {
+        // Emulate lifecycle signals, not transport or the countdown clock. Headless
+        // engines do not reliably hide a page when another page is brought forward.
+        window.__hidden = false;
+        window.__received = [];
+        window.__tabHistory = [];
+        Object.defineProperty(document, "visibilityState", { get: () => window.__hidden ? "hidden" : "visible" });
+        Object.defineProperty(document, "hidden", { get: () => window.__hidden });
+        document.hasFocus = () => !window.__hidden;
+        const Native = window.EventSource;
+        window.EventSource = class extends Native {
+          constructor(...args) {
+            super(...args);
+            this.addEventListener("signal", (e) => window.__received.push(JSON.parse(e.data)));
+          }
+        };
+        window.__setHidden = (hidden) => {
+          window.__hidden = hidden;
+          document.dispatchEvent(new Event("visibilitychange"));
+          window.dispatchEvent(new Event(hidden ? "blur" : "focus"));
+        };
+        document.addEventListener("DOMContentLoaded", () => {
+          const record = () => {
+            const sample = { title: document.title, icon: document.querySelector('link[rel="icon"]').getAttribute("href"), at: Date.now() };
+            const prev = window.__tabHistory.at(-1);
+            if (!prev || prev.title !== sample.title || prev.icon !== sample.icon) window.__tabHistory.push(sample);
+          };
+          new MutationObserver(record).observe(document.head, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["href"] });
+        });
+      });
+      const receiver = await receiverContext.newPage();
+      const sender = await senderContext.newPage();
+      for (const page of [receiver, sender]) page.on("pageerror", (e) => errors.push(String(e)));
+      const room = freshRoom();
+      await Promise.all([receiver.goto(`${A}/r/${room}`), sender.goto(`${B}/r/${room}`)]);
+      await expect(receiver.locator("body")).toHaveAttribute("data-tab-ui", "tab-countdown-v1");
+      await expect(receiver.locator(".user")).toHaveCount(2);
+      await receiver.locator("#availability").click();
+      await expect(receiver.locator("#availability-state")).toHaveText("불가능");
+      await receiver.evaluate(() => window.__setHidden(true));
+      await sender.locator("#signal").click();
+      await expect.poll(() => receiver.evaluate(() => window.__received.length)).toBe(1);
+      await expect(receiver.locator("body")).toHaveAttribute("data-tab-unread", "true");
+      await expect(receiver).toHaveTitle(/^\d{2}:\d{2} · (PING!|새 핑) · 1\/2명$/);
+      const before = await receiver.locator("body").getAttribute("data-tab-countdown");
+      await expect.poll(() => receiver.locator("body").getAttribute("data-tab-countdown")).not.toBe(before);
+      await expect.poll(() => receiver.evaluate(() => new Set(window.__tabHistory.filter(x => x.icon.startsWith("data:")).map(x => x.icon)).size)).toBe(2);
+      const firstEvent = await receiver.locator("#ping-clock").getAttribute("data-event-id");
+      // Leave time for the countdown to fall before a distinct peer ping renews it.
+      await receiver.waitForTimeout(3200);
+      const earlier = await receiver.locator("body").getAttribute("data-tab-countdown");
+      await sender.locator("#signal").click();
+      await expect.poll(() => receiver.evaluate(() => window.__received.length)).toBe(2);
+      await expect(receiver.locator("#ping-clock")).not.toHaveAttribute("data-event-id", firstEvent);
+      await expect.poll(() => receiver.locator("body").getAttribute("data-tab-countdown")).toMatch(/^(05:00|04:59)$/);
+      expect(await receiver.locator("body").getAttribute("data-tab-countdown")).not.toBe(earlier);
+      await expect(receiver.locator("#availability-state")).toHaveText("불가능");
+      await receiver.emulateMedia({ reducedMotion: "reduce" });
+      await expect(receiver.locator("body")).toHaveAttribute("data-tab-pulsing", "false");
+      await expect(receiver).toHaveTitle(/^\d{2}:\d{2} · PING! · 1\/2명$/);
+      const steadyIcon = await receiver.locator('link[rel="icon"]').getAttribute("href");
+      await receiver.waitForTimeout(1700);
+      expect(await receiver.locator('link[rel="icon"]').getAttribute("href")).toBe(steadyIcon);
+      await receiver.evaluate(() => window.__setHidden(false));
+      await expect(receiver.locator("body")).toHaveAttribute("data-tab-unread", "false");
+      await expect(receiver).toHaveTitle(/^\d{2}:\d{2} · ping · 1\/2명$/);
+      await expect(receiver.locator('link[rel="icon"]')).toHaveAttribute("href", "/icon-active.svg");
+      await expect(receiver.locator("#availability-state")).toHaveText("불가능");
+      // A replayed snapshot must not re-arm an already acknowledged ping.
+      await receiver.evaluate(() => window.__setHidden(true));
+      await receiver.waitForTimeout(1200);
+      await expect(receiver.locator("body")).toHaveAttribute("data-tab-unread", "false");
+      expect(errors).toEqual([]);
+      const history = await receiver.evaluate(() => window.__tabHistory);
+      await info.attach("tab-title-and-favicon-history", { body: JSON.stringify({ engine: name, simulatedVisibility: true, nativeSSE: true, history, errors }), contentType: "application/json" });
+      await receiver.evaluate(() => window.__setHidden(false));
+      await receiver.screenshot({ path: info.outputPath(`${name.toLowerCase()}-tab-countdown.png`), fullPage: true });
+    } finally { await browser.close(); }
+  });
+}
