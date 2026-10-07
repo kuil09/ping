@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { HISTORY_LIMIT, HistoryTracker, LocalHistory } from "../public/history.js";
-
 class MemoryStorage {
   values = new Map<string, string>();
   get length() { return this.values.size; }
@@ -8,9 +7,9 @@ class MemoryStorage {
   getItem(key: string) { return this.values.get(key) ?? null; }
   setItem(key: string, value: string) { this.values.set(key, value); }
   removeItem(key: string) { this.values.delete(key); }
+  clear() { this.values.clear(); }
 }
 const event = (id: string, at: number) => ({ id, kind: "ping", name: "니트로", at, observed: false });
-
 Deno.test("history persists per channel and duplicate replay never duplicates or renames old pings", () => {
   const storage = new MemoryStorage(), now = () => 1_000_000;
   const a = new LocalHistory("one", { storage: () => storage, now });
@@ -19,7 +18,6 @@ Deno.test("history persists per channel and duplicate replay never duplicates or
   assert.equal(reload.entries().length, 1); assert.equal(reload.entries()[0].name, "니트로");
   assert.equal(new LocalHistory("two", { storage: () => storage, now }).entries().length, 0);
 });
-
 Deno.test("per-entry keys keep different tabs' writes and synchronize clear without touching other app data", () => {
   const storage = new MemoryStorage(); let now = 1_000_000;
   storage.setItem("ping:clientId", "keep-me"); storage.setItem("other-app", "keep-too");
@@ -32,7 +30,6 @@ Deno.test("per-entry keys keep different tabs' writes and synchronize clear with
   now += 1000; b.add(event("three", now)); a.refresh(); assert.equal(a.entries().length, 1);
   assert.equal(storage.getItem("ping:clientId"), "keep-me"); assert.equal(storage.getItem("other-app"), "keep-too");
 });
-
 Deno.test("history caps entries, rejects stale/future values and prunes persisted keys", () => {
   const storage = new MemoryStorage(), now = 100_000_000_000;
   const store = new LocalHistory("room", { storage: () => storage, now: () => now });
@@ -44,7 +41,6 @@ Deno.test("history caps entries, rejects stale/future values and prunes persiste
   store.add(event("out-of-order", now - 10_000));
   assert.equal([...storage.values.keys()].filter(k => k.includes(":event:")).length, HISTORY_LIMIT);
 });
-
 Deno.test("blocked storage, exhausted quota and damaged JSON never disable the in-memory history", () => {
   const denied = new LocalHistory("one", { storage: () => { throw new Error("denied"); }, now: () => 1_000_000 });
   denied.add(event("one", 999_000)); assert.equal(denied.entries().length, 1); assert.equal(denied.persistent, false);
@@ -56,7 +52,6 @@ Deno.test("blocked storage, exhausted quota and damaged JSON never disable the i
   const safe = new LocalHistory("one", { storage: () => storage, now: () => 1_000_000 });
   assert.equal(safe.entries().length, 0); safe.add(event("good", 999_000)); assert.equal(safe.entries().length, 1);
 });
-
 Deno.test("tracker uses initial membership only as baseline and timestamps confirmed user actions", () => {
   let now = 1_000_000;
   const store = new LocalHistory("room", { storage: () => new MemoryStorage(), now: () => now });
@@ -80,7 +75,6 @@ Deno.test("tracker uses initial membership only as baseline and timestamps confi
   assert.equal(entries[0].observed, true); assert.equal(entries[2].from, "니트로"); assert.equal(entries[3].available, true);
   tracker.observe({ ...baseline, revision: 6, users: [renamed], serverTime: now }); assert.equal(store.entries().length, 4);
 });
-
 Deno.test("confirmed ping replay retains original names across rename, reload, reset and clear", () => {
   const storage = new MemoryStorage(); let now = 1_000_000;
   const store = new LocalHistory("room", { storage: () => storage, now: () => now });
