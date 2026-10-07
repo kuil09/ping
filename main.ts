@@ -1,6 +1,7 @@
 import { serveDir, serveFile } from "@std/http/file-server";
 import webpush from "web-push";
 import { ApiError, deploymentGeneration, KvRooms, PRESENCE_TTL_MS, replay, ROOM_TTL_MS, type Room, SIGNAL_TTL_MS } from "./state.ts";
+import { NICKNAME_MAX_LENGTH, PROFILE_UI_VERSION } from "./public/profile.js";
 
 const VERSION = "shared-kv-v2";
 const instanceId = crypto.randomUUID();
@@ -175,6 +176,7 @@ async function handler(req: Request): Promise<Response> {
     }
     if (url.pathname === "/api/config") return json({
       version: VERSION, generation, storage: "deno-kv", pushEnabled,
+      profileUi: PROFILE_UI_VERSION, defaultAvailable: false, nicknameMaxLength: NICKNAME_MAX_LENGTH,
       vapidPublicKey: pushEnabled ? publicKey : null, signalTtlMs: SIGNAL_TTL_MS,
       presenceTtlMs: PRESENCE_TTL_MS, publicOrigin: Deno.env.get("PUBLIC_ORIGIN") || null,
     });
@@ -183,7 +185,7 @@ async function handler(req: Request): Promise<Response> {
       await store.kv.get(["ping", "health"]);
       return json({ ok: true, version: VERSION, generation, storage: "deno-kv", instanceId });
     }
-    const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{3,64})\/(state|events|presence|availability|signal|subscribe)$/);
+    const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{3,64})\/(state|events|presence|availability|nickname|signal|subscribe)$/);
     if (match) {
       const [, roomId, action] = match;
       const store = await getStore();
@@ -205,6 +207,10 @@ async function handler(req: Request): Promise<Response> {
       if (action === "availability") {
         if (typeof body.available !== "boolean") throw new ApiError(400, "invalid_availability");
         const result = await store.act(roomId, body.clientId, body.sessionId, "availability", "", body.available);
+        return json(store.snapshot(result.room));
+      }
+      if (action === "nickname") {
+        const result = await store.act(roomId, body.clientId, body.sessionId, "nickname", "", undefined, body.nickname);
         return json(store.snapshot(result.room));
       }
       if (action === "signal") {
