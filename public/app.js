@@ -1,3 +1,5 @@
+import { TAB_UI_VERSION, TabStatus } from "./tab-status.js";
+
 const roomId = location.pathname.split("/").filter(Boolean).at(-1);
 const signalButton = document.querySelector("#signal");
 const notifyButton = document.querySelector("#notify");
@@ -12,6 +14,8 @@ const pingAge = document.querySelector("#ping-age");
 const clockEl = document.querySelector("#ping-clock");
 const memberCount = document.querySelector("#member-count");
 const timeFormat = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+const tabStatus = new TabStatus();
+document.body.dataset.tabUi = TAB_UI_VERSION;
 function uid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
   return Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -37,6 +41,7 @@ let source;
 let streamAlive = false;
 let lastStreamAt = 0;
 let ready = false;
+let pageStopped = false;
 let audioContext;
 let pendingRequestId;
 let availabilityBusy = false;
@@ -48,6 +53,7 @@ let registrationPromise;
 const retiredGenerations = new Set();
 const seen = new Set();
 const visible = () => document.visibilityState !== "hidden";
+const focused = () => visible() && document.hasFocus();
 const now = () => Date.now() + clockOffset;
 const cursor = () => epoch ? `${epoch}:${sequence}` : null;
 const presentUsers = () => users.filter((user) => user.online && (user.onlineUntil ?? Infinity) > now());
@@ -71,6 +77,7 @@ function adoptGeneration(next) {
   channelPing = null;
   users = [];
   seen.clear();
+  tabStatus.reset();
   pendingRequestId = undefined;
   if (previous) {
     source?.close();
@@ -153,6 +160,20 @@ function refreshAvailability() {
   availabilityButton.setAttribute("aria-checked", String(me?.available !== false));
   availabilityState.textContent = me ? (me.available !== false ? "가능" : "불가능") : "연결 중";
 }
+function refreshTab() {
+  if (pageStopped) return;
+  const time = now();
+  const current = presentUsers();
+  const active = current.filter((user) => user.pingUntil > time).length;
+  const reducedMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const tab = tabStatus.view(channelPing, time, current.length, active, focused(), reducedMotion);
+  if (document.title !== tab.title) document.title = tab.title;
+  const favicon = document.querySelector('link[rel="icon"]');
+  if (favicon && favicon.getAttribute("href") !== tab.icon) favicon.setAttribute("href", tab.icon);
+  document.body.dataset.tabUnread = String(tab.unread);
+  document.body.dataset.tabCountdown = tab.countdown || "";
+  document.body.dataset.tabPulsing = String(tab.pulsing);
+}
 function drawUsers() {
   const current = presentUsers();
   renderedIds = current.map((user) => user.clientId).join(",");
@@ -212,11 +233,7 @@ function refreshDisplay() {
     pingTime.textContent = "--:--:--";
     pingAge.textContent = "아직 없음";
   }
-  const title = remaining > 0 ? `ping · ${active}/${current.length}` : `ping · ${current.length}`;
-  if (document.title !== title) document.title = title;
-  const favicon = document.querySelector('link[rel="icon"]');
-  const icon = remaining > 0 ? "/icon-active.svg" : "/icon.svg";
-  if (favicon && favicon.getAttribute("href") !== icon) favicon.setAttribute("href", icon);
+  refreshTab();
   const availableCount = current.filter((user) => user.available !== false).length;
   memberCount.textContent = `${current.length}명 · ${availableCount}명 가능`;
   usersEl.setAttribute("aria-label", `${current.length}명 · ${availableCount}명 가능 · ${active}명 핑 ON`);
@@ -234,6 +251,7 @@ function acceptSignal(signal, audible = true) {
   if (!channelPing || signal.sequence > channelPing.sequence) channelPing = signal;
   const user = users.find((u) => u.clientId === signal.clientId);
   if (user) { user.pingUntil = Math.max(user.pingUntil, signal.pingUntil); user.pingAt = signal.createdAt; }
+  tabStatus.notice(signal, clientId, focused(), now());
   // A ping never changes anyone's manually selected availability.
   drawUsers();
   if (audible && now() - signal.createdAt < 10000 && signal.pingUntil > now()) { alertPing(); animatePing(); }
@@ -244,7 +262,7 @@ function applyState(state, fromStream = false) {
   if (!adoptGeneration(state.generation)) return false;
   if (epoch === state.epoch && (state.revision < revision || state.sequence < sequence)) return false;
   const initial = epoch === null || epoch !== state.epoch;
-  if (initial) { epoch = state.epoch; revision = -1; sequence = 0; channelPing = null; seen.clear(); }
+  if (initial) { epoch = state.epoch; revision = -1; sequence = 0; channelPing = null; seen.clear(); tabStatus.reset(); }
   clockOffset = state.serverTime - Date.now();
   if (!initial) for (const signal of state.events || []) if (signal.sequence > sequence) acceptSignal(signal);
   users = state.users;
@@ -257,14 +275,14 @@ function applyState(state, fromStream = false) {
   return true;
 }
 async function heartbeat() {
-  if (presenceBusy || !visible()) return;
+  if (presenceBusy || pageStopped || navigator.onLine === false) return;
   presenceBusy = true;
   try { applyState(await request(`${api}/presence`, { clientId, sessionId, online: true })); }
   catch (error) { transport(false); showError(error); }
   finally { presenceBusy = false; }
 }
 async function poll() {
-  if (stateBusy || !visible() || (streamAlive && Date.now() - lastStreamAt < 15000)) return;
+  if (stateBusy || pageStopped || navigator.onLine === false || (streamAlive && Date.now() - lastStreamAt < 15000)) return;
   stateBusy = true;
   try { applyState(await request(`${api}/state`)); }
   catch (error) { transport(false); showError(error); }
@@ -273,19 +291,19 @@ async function poll() {
 function connectEvents() {
   source?.close();
   streamAlive = false;
-  if (!visible() || !("EventSource" in globalThis)) return;
+  if (pageStopped || navigator.onLine === false || !("EventSource" in globalThis)) return;
   const query = new URLSearchParams({ clientId, sessionId });
   if (cursor()) query.set("since", cursor());
   const current = new EventSource(`${api}/events?${query}`);
   source = current;
   current.addEventListener("users", (event) => {
-    if (source !== current) return;
+    if (source !== current || pageStopped) return;
     try {
       if (applyState(JSON.parse(event.data), true)) { streamAlive = true; lastStreamAt = Date.now(); }
     } catch (error) { showError(error); }
   });
   current.addEventListener("signal", (event) => {
-    if (source !== current) return;
+    if (source !== current || pageStopped) return;
     try { acceptSignal(JSON.parse(event.data)); lastStreamAt = Date.now(); }
     catch (error) { showError(error); }
   });
@@ -362,21 +380,33 @@ async function optionalFeatures() {
     void registerPush().catch(() => {});
   } catch { notifyButton.hidden = true; }
 }
-function pause() { source?.close(); streamAlive = false; }
+function pause() { source?.close(); source = undefined; streamAlive = false; }
 function leave() {
+  pageStopped = true;
   pause();
   try {
     navigator.sendBeacon?.(`${api}/presence`, new Blob([JSON.stringify({ clientId, sessionId, online: false })], { type: "application/json" }));
   } catch { /* no beacon needed: lease expiry removes this session */ }
 }
 function resume() {
-  if (!visible()) return;
+  if (pageStopped) return;
+  refreshTab();
   connectEvents(); void heartbeat(); void registerPush().catch(() => {});
 }
-// Hidden is not an explicit leave. If suspended, the 45-second lease expires naturally.
-document.addEventListener("visibilitychange", () => visible() ? resume() : pause());
+// An executable background tab is still connected. Only a real freeze/close stops it;
+// a suspended or disconnected device naturally loses its 45-second presence lease.
+document.addEventListener("visibilitychange", () => {
+  refreshTab();
+  if (visible()) { refreshDisplay(); resume(); }
+});
+globalThis.addEventListener("focus", refreshTab);
+globalThis.addEventListener("blur", refreshTab);
 globalThis.addEventListener("pagehide", leave);
-globalThis.addEventListener("pageshow", (event) => { if (event.persisted) resume(); });
+globalThis.addEventListener("pageshow", (event) => {
+  if (event.persisted || pageStopped) { pageStopped = false; resume(); }
+});
+document.addEventListener("freeze", () => { pageStopped = true; pause(); });
+document.addEventListener("resume", () => { pageStopped = false; resume(); });
 globalThis.addEventListener("online", resume);
 globalThis.addEventListener("offline", () => { pause(); transport(false); status("오프라인"); });
 transport(false);
@@ -384,6 +414,9 @@ notifyButton.hidden = true;
 connectEvents();
 void heartbeat();
 void optionalFeatures();
-setInterval(() => { if (visible()) refreshDisplay(); }, 250);
+setInterval(() => { if (!pageStopped && visible()) refreshDisplay(); }, 250);
+// Not requestAnimationFrame and not gated on visibility. Browsers may still throttle
+// or freeze background timers; every callback recomputes from the absolute deadline.
+setInterval(refreshTab, 1000);
 setInterval(() => void heartbeat(), 15000);
 setInterval(() => void poll(), 5000);
