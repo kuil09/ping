@@ -1,5 +1,5 @@
-const CACHE = "ping-shell-v8";
-const SHELL = ["/index.html", "/styles.css", "/history.css", "/app.js", "/tab-status.js", "/profile.js", "/history.js", "/history-view.js", "/icon.svg", "/icon-active.svg", "/manifest.webmanifest"];
+const CACHE = "ping-shell-v9-soft-chime";
+const SHELL = ["/index.html", "/styles.css", "/history.css", "/app.js", "/ping-sound.js", "/tab-status.js", "/profile.js", "/history.js", "/history-view.js", "/icon.svg", "/icon-active.svg", "/manifest.webmanifest"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });

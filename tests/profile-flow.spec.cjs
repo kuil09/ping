@@ -4,14 +4,15 @@ const crypto = require("node:crypto");
 const A = process.env.PING_TEST_ORIGIN || "http://127.0.0.1:9101";
 const B = process.env.PING_TEST_ORIGIN || "http://127.0.0.1:9102";
 const fresh = () => "profile_" + crypto.randomUUID().replaceAll("-", "");
+const ownProfile = '.user[data-self="true"] .user-profile';
+const ownName = '.user[data-self="true"] .user-name';
 
 for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebKit", webkit, "iPhone 13"]]) {
-  test(`${label}: enter a name, collapse to my profile, then explicitly toggle availability`, async ({}, info) => {
+  test(`${label}: enter a name, edit only from my member card, then explicitly toggle availability`, async ({}, info) => {
     const browser = await engine.launch();
     const errors = [];
     try {
       // This context injects network failures. Workers bypass page.route on WebKit.
-      // The peer and the existing end-to-end suites retain normal service workers.
       const context = await browser.newContext({ ...devices[device], colorScheme: "light", serviceWorkers: "block" });
       const peerContext = await browser.newContext({ ...devices[device] });
       const page = await context.newPage(), peer = await peerContext.newPage(), room = fresh();
@@ -20,7 +21,7 @@ for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebK
       await expect(page.locator("body")).toHaveAttribute("data-profile-flow", "nickname-first-v1");
       await expect(page.locator(".user")).toHaveCount(2);
       await expect(page.locator("#nickname-form")).toBeVisible();
-      await expect(page.locator("#self-profile")).toBeHidden();
+      await expect(page.locator("#self-profile")).toHaveCount(0);
       await expect(page.locator("#availability-control")).toBeHidden();
       await expect(page.locator("#availability")).toBeDisabled();
       await expect(page.locator("#signal")).toBeDisabled();
@@ -40,23 +41,25 @@ for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebK
       expect(injectedFailures).toBe(1);
       await expect(page.locator("#nickname-feedback")).toContainText("저장 실패");
       await expect(page.locator("#nickname")).toHaveValue("니트로");
-      await expect(page.locator("#self-profile")).toBeHidden();
+      await expect(page.locator("#self-profile")).toHaveCount(0);
       await expect(page.locator("#availability")).toBeDisabled();
       await page.unroute("**/nickname");
       await setNickname(page, "니트로"); await setNickname(peer, "구름");
-      await expect(page.locator("#self-profile")).toBeVisible();
+      await expect(page.locator(ownProfile)).toBeVisible();
+      await expect(page.locator("#self-profile")).toHaveCount(0);
+      await expect(page.locator('.user[data-self="false"] .user-profile')).toHaveCount(0);
       await expect(page.locator("#nickname")).toBeHidden();
       await expect(page.locator("#availability-state")).toHaveText("불가능");
       await expect(peer.locator('.user[data-self="false"] .user-name')).toHaveText("니트로");
-      const profileBox = await page.locator("#self-profile").boundingBox();
+      const profileBox = await page.locator(ownProfile).boundingBox();
       const statusBox = await page.locator("#availability").boundingBox();
-      expect(profileBox.y + profileBox.height).toBeLessThan(statusBox.y);
+      expect(statusBox.y + statusBox.height).toBeLessThan(profileBox.y);
       await page.screenshot({ path: info.outputPath("02-profile-ready.png"), fullPage: true });
       await page.locator("#availability").click();
       await expect(peer.locator('.user[data-self="false"]')).toHaveAttribute("data-available", "true");
-      await page.locator("#self-profile").focus(); await page.keyboard.press("Enter");
+      await page.locator(ownProfile).focus(); await page.keyboard.press("Enter");
       await expect(page.locator("#nickname")).toBeFocused();
-      await expect(page.locator("#self-profile")).toHaveAttribute("aria-expanded", "true");
+      await expect(page.locator(ownProfile)).toHaveAttribute("aria-expanded", "true");
       await expect(page.locator("#availability")).toBeDisabled();
       await page.locator("#nickname").fill("수정 중");
       await peer.locator("#signal").click();
@@ -66,27 +69,27 @@ for (const [label, engine, device] of [["Chromium", chromium, "Pixel 7"], ["WebK
       await page.screenshot({ path: info.outputPath("03-profile-editing.png"), fullPage: true });
       await page.locator("#nickname-cancel").click();
       await expect(page.locator("#nickname-form")).toBeHidden();
-      await expect(page.locator("#profile-name")).toHaveText("니트로");
+      await expect(page.locator(ownName)).toHaveText("니트로");
       await expect(page.locator("#availability-state")).toHaveText("가능");
       await expect(peer.locator('.user[data-self="false"] .user-name')).toHaveText("니트로");
-      await page.locator('.user[data-self="true"] .user-profile').click();
+      await page.locator(ownProfile).click();
       await expect(page.locator("#nickname")).toBeFocused();
       await page.locator("#nickname").fill(" "); await page.locator("#nickname-save").click();
       await expect(page.locator("#nickname-feedback")).toHaveText("닉네임을 입력하세요.");
       await page.locator("#nickname").press("Escape");
       await expect(page.locator("#nickname-form")).toBeHidden();
-      await expect(page.locator("#self-profile")).toBeFocused();
+      await expect(page.locator(ownProfile)).toBeFocused();
       await setNickname(page, "니트로 개발");
       await expect(peer.locator('.user[data-self="false"] .user-name')).toHaveText("니트로 개발");
       await expect(page.locator("#availability-state")).toHaveText("가능");
       await page.reload();
       await expect(page.locator("#nickname-form")).toBeHidden();
-      await expect(page.locator("#profile-name")).toHaveText("니트로 개발");
+      await expect(page.locator(ownName)).toHaveText("니트로 개발");
       await expect(page.locator("#availability-state")).toHaveText("가능");
       const sibling = await context.newPage(); await sibling.goto(`${A}/r/${room}`);
       await expect(sibling.locator("#nickname-form")).toBeHidden();
       await setNickname(page, "새 이름");
-      await expect(sibling.locator("#profile-name")).toHaveText("새 이름");
+      await expect(sibling.locator(ownName)).toHaveText("새 이름");
       await expect(sibling.locator("#nickname-form")).toBeHidden();
       await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
       await page.screenshot({ path: info.outputPath("04-profile-dark.png"), fullPage: true });
@@ -110,7 +113,7 @@ test("a pending nickname cannot unlock the toggle before its confirmed applicati
     await expect.poll(() => intercepted).toBe(true);
     await expect(page.locator("#nickname-form")).toHaveAttribute("aria-busy", "true");
     await expect(page.locator("#availability")).toBeDisabled();
-    await expect(page.locator("#self-profile")).toBeHidden();
+    await expect(page.locator("#self-profile")).toHaveCount(0);
     await expect(page.locator("#nickname")).toHaveJSProperty("readOnly", true);
     release();
     await expect(page.locator("#nickname-form")).toBeHidden();
