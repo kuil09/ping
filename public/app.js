@@ -1,5 +1,7 @@
 import { TAB_UI_VERSION, TabStatus } from "./tab-status.js";
 import { normalizeNickname, PROFILE_UI_VERSION } from "./profile.js";
+import { HISTORY_VERSION, LocalHistory, HistoryTracker } from "./history.js";
+import { attachHistory } from "./history-view.js";
 
 const roomId = location.pathname.split("/").filter(Boolean).at(-1);
 const signalButton = document.querySelector("#signal");
@@ -22,6 +24,7 @@ const timeFormat = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "
 const tabStatus = new TabStatus();
 document.body.dataset.tabUi = TAB_UI_VERSION;
 document.body.dataset.profileUi = PROFILE_UI_VERSION;
+document.body.dataset.historyUi = HISTORY_VERSION;
 function uid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
   return Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -58,6 +61,7 @@ let stateBusy = false;
 let renderedIds = "";
 let config = { pushEnabled: false, vapidPublicKey: null, signalTtlMs: 300000 };
 let registrationPromise;
+let activity;
 const retiredGenerations = new Set();
 const seen = new Set();
 const visible = () => document.visibilityState !== "hidden";
@@ -89,7 +93,7 @@ function adoptGeneration(next) {
   tabStatus.reset();
   pendingRequestId = undefined;
   if (previous) {
-    // No old availability or nickname is automatically written into the new KV generation.
+    // Deployment resets live server state, not this browser's local history.
     if (!nicknameDirty) nicknameInput.value = "";
     nicknameFeedback.textContent = "";
     source?.close();
@@ -235,7 +239,6 @@ function refreshDisplay() {
     item.dataset.online = "true";
     item.dataset.available = String(available);
     item.style.setProperty("--user-life", String(life));
-    // Never interpret a participant's chosen name as HTML.
     item.querySelector(".user-name").textContent = name;
     item.querySelector(".user-name").title = name;
     item.querySelector(".user-label").textContent = `${user.clientId === clientId ? "나 · " : ""}${available ? "가능" : "불가능"}`;
@@ -279,8 +282,8 @@ function acceptSignal(signal, audible = true) {
   if (!channelPing || signal.sequence > channelPing.sequence) channelPing = signal;
   const user = users.find((u) => u.clientId === signal.clientId);
   if (user) { user.pingUntil = Math.max(user.pingUntil, signal.pingUntil); user.pingAt = signal.createdAt; }
+  try { activity?.signal(signal, generation, users); } catch { /* history never blocks signaling */ }
   tabStatus.notice(signal, clientId, focused(), now());
-  // A ping never changes anyone's manually selected availability or nickname.
   drawUsers();
   if (audible && now() - signal.createdAt < 10000 && signal.pingUntil > now()) { alertPing(); animatePing(); }
 }
@@ -292,6 +295,7 @@ function applyState(state, fromStream = false) {
   const initial = epoch === null || epoch !== state.epoch;
   if (initial) { epoch = state.epoch; revision = -1; sequence = 0; channelPing = null; seen.clear(); tabStatus.reset(); }
   clockOffset = state.serverTime - Date.now();
+  try { activity?.observe(state); } catch { /* optional local recording */ }
   if (!initial) for (const signal of state.events || []) if (signal.sequence > sequence) acceptSignal(signal);
   users = state.users;
   channelPing = state.channelPing || null;
@@ -386,7 +390,9 @@ nicknameForm.addEventListener("submit", async (event) => {
   try {
     const state = await request(`${api}/nickname`, { clientId, sessionId, nickname: name });
     const accepted = applyState(state);
-    if (!accepted && state.generation !== generation) throw new Error("deployment_changed");
+    if (!accepted && state.generation !== generation) {
+      const error = new Error("deployment_changed"); error.generation = state.generation; throw error;
+    }
     nicknameDirty = false;
     nicknameFeedback.textContent = "저장됨";
   } catch (error) {
@@ -455,7 +461,6 @@ function resume() {
   refreshTab();
   connectEvents(); void heartbeat(); void registerPush().catch(() => {});
 }
-// Executable background tabs stay connected; freeze/disconnect retains the 45-second lease.
 document.addEventListener("visibilitychange", () => {
   refreshTab();
   if (visible()) { refreshDisplay(); resume(); }
@@ -470,13 +475,18 @@ document.addEventListener("freeze", () => { pageStopped = true; pause(); });
 document.addEventListener("resume", () => { pageStopped = false; resume(); });
 globalThis.addEventListener("online", resume);
 globalThis.addEventListener("offline", () => { pause(); transport(false); status("오프라인"); });
+// localStorage denial/quota/corruption is an optional-feature failure, not a transport failure.
+try {
+  const historyStore = new LocalHistory(roomId, { now });
+  activity = new HistoryTracker(historyStore);
+  attachHistory(historyStore, document.querySelector(".stage"));
+} catch { /* core controls continue even if local recording is unavailable */ }
 transport(false);
 notifyButton.hidden = true;
 connectEvents();
 void heartbeat();
 void optionalFeatures();
 setInterval(() => { if (!pageStopped && visible()) refreshDisplay(); }, 250);
-// Background callbacks recalculate from the absolute deadline, never a local decrement.
 setInterval(refreshTab, 1000);
 setInterval(() => void heartbeat(), 15000);
 setInterval(() => void poll(), 5000);
