@@ -113,7 +113,7 @@ export class PingRoom extends DurableObject<Env> {
       if (!a.clientId) throw new Error("hello_required");
       if (message.type === "visibility") { a.visible = message.visible === true; ws.serializeAttachment(a); return; }
       const room = this.read();
-      this.sync(room, now);
+      if (this.sync(room, now)) { this.save(room); this.broadcast(room); }
       if (message.type === "subscribe") {
         if (typeof id !== "string" || !/^[A-Za-z0-9_-]{8,80}$/.test(id)) throw new Error("invalid_request");
         if (!vapid(this.env)) throw new Error("push_not_configured");

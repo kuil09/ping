@@ -18,7 +18,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci --no-audit --no-fund
-      - run: npm run check && npm test && npm run build
+      - run: npm run check && npm test && npm run build && npm run test:runtime
       - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:browser
       - name: Deploy the tested revision only

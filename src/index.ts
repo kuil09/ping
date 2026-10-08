@@ -25,7 +25,7 @@ export default {
       return env.ROOMS.get(env.ROOMS.idFromName(match[1])).fetch(request);
     }
     if (url.pathname.startsWith("/api/")) return json({ error: "not_found" }, 404);
-    if (url.pathname === "/") return Response.redirect(new URL(`/r/${crypto.randomUUID().replaceAll("-", "")}`, url), 302);
+    if (url.pathname === "/") return Response.redirect(new URL(`/r/${crypto.randomUUID().replaceAll("-", "")}`, url).href, 302);
     if (/^\/r\/[a-f0-9]{32}$/.test(url.pathname)) {
       const response = await env.ASSETS.fetch(new Request(new URL("/index.html", url), request));
       const headers = new Headers(response.headers);

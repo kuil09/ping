@@ -55,7 +55,7 @@ for(const [label,engine,device] of [['Chromium',chromium,'Pixel 7'],['WebKit',we
    const sibling=await ca.newPage();await sibling.goto(`${ORIGIN}/r/${id}`);
    await expect(sibling.locator('.user')).toHaveCount(2);await sibling.close();
    const other=await ca.newPage();await other.goto(`${ORIGIN}/r/${room()}`);await expect(other.locator('.user')).toHaveCount(1);await other.close();
-   // Idle long enough for native workerd's hibernation path; transport heartbeat is auto-responded.
+   // Idle transport heartbeat is auto-responded; this is not a measurement of production billing.
    await a.waitForTimeout(16000);await b.locator('#signal').click();
    await expect(a.locator('.history-entry[data-kind="ping"]')).toHaveCount(4);
    const requests=[];a.on('request',r=>requests.push(new URL(r.url()).pathname));
@@ -114,3 +114,45 @@ test('optional APIs and local storage failure never prevent WebSocket signaling'
   await page.locator('#history > summary').click();await expect(page.locator('#history-note')).toContainText('로컬 저장 불가');
  }finally{await browser.close();}
 });
+for (const [label, engine] of [['Chromium', chromium], ['WebKit', webkit]]) {
+ test(`${label}: native soft audio plays once, hidden peer pings update the tab without audio, and reconnect restores missed events`, async () => {
+  const browser=await engine.launch();let peer;
+  try {
+   const context=await browser.newContext();
+   await context.addInitScript(()=>{
+    window.__audioStarts=0;
+    const Native=window.AudioContext||window.webkitAudioContext;
+    if(Native) window.AudioContext=class extends Native {
+     createBufferSource(){const source=super.createBufferSource(),start=source.start.bind(source);
+      source.start=(...args)=>{window.__audioStarts++;return start(...args);};return source;}
+    };
+   });
+   const page=await context.newPage(),id=room();await page.goto(`${ORIGIN}/r/${id}`);await setNickname(page,'소리 수신자');
+   await page.locator('#signal').click();await expect.poll(()=>page.evaluate(()=>window.__audioStarts)).toBe(1);
+   await page.waitForTimeout(200);expect(await page.evaluate(()=>window.__audioStarts)).toBe(1);
+   const peak=await page.evaluate(async()=>{
+    const {renderPingSamples}=await import('/ping-sound.js');
+    const Offline=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+    const data=renderPingSamples(48000),context=new Offline(1,data.length,48000),buffer=context.createBuffer(1,data.length,48000);
+    buffer.getChannelData(0).set(data);const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);source.start();
+    const rendered=await context.startRendering();return Math.max(...rendered.getChannelData(0));
+   });
+   expect(peak).toBeGreaterThan(.19);expect(peak).toBeLessThan(.201);
+   await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+   peer=await socket(id,'d'.repeat(64));const name=peer.command('nickname',{nickname:'배경 발신자'});
+   await expect.poll(()=>peer.messages.some(m=>m.type==='ack'&&m.id===name)).toBe(true);
+   const signal=peer.command('signal');await expect.poll(()=>peer.messages.some(m=>m.type==='ack'&&m.id===signal)).toBe(true);
+   await expect(page.locator('body')).toHaveAttribute('data-tab-unread','true');
+   await expect(page).toHaveTitle(/^(05:00|04:\d\d) · (PING!|새 핑) · 2\/2명$/);
+   expect(await page.evaluate(()=>window.__audioStarts)).toBe(1);
+   await context.setOffline(true);await expect(page.locator('body')).toHaveAttribute('data-ready','false');
+   await page.waitForTimeout(1100);const missed=peer.command('signal');
+   await expect.poll(()=>peer.messages.some(m=>m.type==='ack'&&m.id===missed)).toBe(true);
+   const eventId=peer.messages.find(m=>m.type==='ack'&&m.id===missed).signal.eventId;
+   await context.setOffline(false);await expect(page.locator('body')).toHaveAttribute('data-ready','true');
+   await expect(page.locator('#ping-clock')).toHaveAttribute('data-event-id',eventId);
+   await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'visible'});document.dispatchEvent(new Event('visibilitychange'));});
+   await page.locator('#history > summary').click();await expect(page.locator('.history-entry[data-kind="ping"]')).toHaveCount(3);
+  }finally{peer?.ws.close();await browser.close();}
+ });
+}

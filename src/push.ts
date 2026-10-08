@@ -24,14 +24,14 @@ export function validSubscription(value: unknown): value is Subscription {
   } catch { return false; }
 }
 /** Build encrypted Web Push using the established library, then use Workers fetch, not node:https. */
-export async function sendPush(env: PushEnv, subscription: Subscription, payload: unknown): Promise<number> {
+export async function sendPush(env: PushEnv, subscription: Subscription, payload: unknown, dispatch: typeof fetch = fetch): Promise<number> {
   const details = vapid(env);
   if (!details) return 0;
   try {
     const request = webpush.generateRequestDetails(subscription, JSON.stringify(payload), {
       TTL: 300, urgency: "high", vapidDetails: details,
     });
-    const response = await fetch(request.endpoint, { method: "POST", headers: request.headers as HeadersInit,
+    const response = await dispatch(request.endpoint, { method: "POST", headers: request.headers as HeadersInit,
       body: new Uint8Array(request.body as Buffer), redirect: "error", signal: AbortSignal.timeout(5000) });
     await response.body?.cancel();
     return response.status;
