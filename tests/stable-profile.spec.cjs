@@ -35,22 +35,23 @@ for (const [label, engine, device] of [['Chromium', chromium, 'Pixel 7'], ['WebK
       expect(await page.evaluate(() => window.__profileMutations)).toBe(0);
       expect(await page.evaluate(() => window.__buttonTextNode === document.querySelector('#nickname-save').firstChild)).toBe(true);
       await page.evaluate(() => window.__observer.disconnect());
-      await page.locator('#nickname-save').click();
+      await page.locator('#nickname-save').tap();
       await expect(page.locator('#nickname-form')).toBeHidden();
       await expect(page.locator('#availability-state')).toHaveText('불가능');
-      await page.locator('#signal').click();
+      await page.locator('#signal').tap();
       await expect(page.locator('#ping-clock')).toHaveAttribute('data-active', 'true');
       await page.evaluate(() => {
         window.__profileSubmits = 0;
         document.querySelector('#nickname-form').addEventListener('submit', () => window.__profileSubmits++);
       });
       for (let i = 0; i < 16; i++) {
-        await setNickname(page, `반복 저장 ${i + 1}`);
+        await setNickname(page, `반복 저장 ${i + 1}`, { touch: true });
+        expect(await page.evaluate(() => window.__nicknameActions.some(event => event.type === "pointerdown" && event.pointerType === "touch"))).toBe(true);
         await expect(page.locator('#availability-state')).toHaveText('불가능');
         expect(await page.evaluate(() => window.__profileSubmits)).toBe(i + 1);
         await page.waitForTimeout(180);
       }
-      await page.locator('.user-profile').click();
+      await page.locator('.user-profile').tap();
       await page.locator('#nickname').fill('작성 중');
       peer = new WebSocket(`${ORIGIN.replace('http', 'ws')}/api/rooms/${roomId}/ws`, { headers: { Origin: ORIGIN } });
       const messages = [];
@@ -71,7 +72,7 @@ for (const [label, engine, device] of [['Chromium', chromium, 'Pixel 7'], ['WebK
       expect(await page.evaluate(() => window.__profileMutations)).toBe(0);
       await expect(page.locator('#nickname')).toHaveValue('작성 중');
       await page.evaluate(() => window.__observer.disconnect());
-      await page.locator('#nickname-cancel').click();
+      await page.locator('#nickname-cancel').tap();
       await expect(page.locator('.user[data-self="true"] .user-name')).toHaveText('반복 저장 16');
       expect(errors).toEqual([]);
     } finally {
