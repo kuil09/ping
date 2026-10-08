@@ -3,12 +3,14 @@ const { randomUUID } = require('node:crypto');
 const { setNickname } = require('./profile-actions.cjs');
 const WebSocket = require('ws');
 const ORIGIN = 'http://127.0.0.1:8787';
+// This file explicitly owns context traces; avoid starting both tracing systems.
+test.use({ trace: 'off' });
 
 for (const [label, engine, device] of [['Chromium', chromium, 'Pixel 7'], ['WebKit', webkit, 'iPhone 13']]) {
   test(`${label}: form text stays stable across clock ticks and peer updates; sixteen touch saves apply once`, async ({}, info) => {
     const browser = await engine.launch();
     const context = await browser.newContext({ ...devices[device], serviceWorkers: 'block' });
-    // These tests create their own contexts, so fixture-level trace settings do not apply.
+    // Save the browser context trace before closing its manually-created browser.
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
     let page, peer;
     const errors = [];
