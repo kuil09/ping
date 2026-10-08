@@ -3,8 +3,10 @@ import { normalizeNickname, PROFILE_UI_VERSION } from "./profile.js";
 import { HISTORY_VERSION, LocalHistory, HistoryTracker } from "./history.js";
 import { attachHistory } from "./history-view.js";
 import { PingSound, PING_SOUND_VERSION } from "./ping-sound.js";
+import { ChannelConnection } from "./transport.js";
 
 const roomId = location.pathname.split("/").filter(Boolean).at(-1);
+document.querySelector('link[rel="manifest"]').href = `/api/manifest/${roomId}`;
 const signalButton = document.querySelector("#signal");
 const notifyButton = document.querySelector("#notify");
 const shareButton = document.querySelector("#share");
@@ -33,20 +35,12 @@ document.body.dataset.tabUi = TAB_UI_VERSION;
 document.body.dataset.profileUi = PROFILE_UI_VERSION;
 document.body.dataset.profileFlow = "nickname-first-v1";
 document.body.dataset.historyUi = HISTORY_VERSION;
+document.body.dataset.transport = "hibernating-websocket-v1";
 function uid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
   return Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
-function storedClientId() {
-  let value;
-  try { value = localStorage.getItem("ping:clientId"); } catch { /* private mode */ }
-  if (!value || !/^[A-Za-z0-9_-]{8,80}$/.test(value)) value = uid();
-  try { localStorage.setItem("ping:clientId", value); } catch { /* page-local identity */ }
-  return value;
-}
-const clientId = storedClientId();
-const sessionId = uid();
-const api = `/api/rooms/${encodeURIComponent(roomId)}`;
+let clientId = null;
 let users = [];
 let channelPing = null;
 let generation = null;
@@ -54,9 +48,6 @@ let epoch = null;
 let revision = -1;
 let sequence = 0;
 let clockOffset = 0;
-let source;
-let streamAlive = false;
-let lastStreamAt = 0;
 let ready = false;
 let pageStopped = false;
 let pendingRequestId;
@@ -64,8 +55,6 @@ let availabilityBusy = false;
 let nicknameBusy = false;
 let nicknameDirty = false;
 let nicknameEditing = false;
-let presenceBusy = false;
-let stateBusy = false;
 let renderedIds = "";
 let config = { pushEnabled: false, vapidPublicKey: null, signalTtlMs: 300000 };
 let registrationPromise;
@@ -75,8 +64,7 @@ const seen = new Set();
 const visible = () => document.visibilityState !== "hidden";
 const focused = () => visible() && document.hasFocus();
 const now = () => Date.now() + clockOffset;
-const cursor = () => epoch ? `${epoch}:${sequence}` : null;
-const presentUsers = () => users.filter((user) => user.online && (user.onlineUntil ?? Infinity) > now());
+const presentUsers = () => users.filter((user) => user.online);
 const me = () => users.find((user) => user.clientId === clientId);
 const named = () => Boolean(me()?.nickname?.trim());
 function status(message = "") { statusEl.textContent = message; }
@@ -107,9 +95,7 @@ function adoptGeneration(next) {
     nicknameEditing = false;
     if (!nicknameDirty) nicknameInput.value = "";
     nicknameFeedback.textContent = "";
-    source?.close();
-    streamAlive = false;
-    queueMicrotask(() => { connectEvents(); void registerPush().catch(() => {}); });
+    queueMicrotask(() => void registerPush().catch(() => {}));
   }
   return true;
 }
@@ -122,26 +108,9 @@ function showError(error) {
     status("새 배포에 다시 연결 중");
     return;
   }
-  status(code === "shared_storage_unavailable" || code === "service_unavailable"
-    ? "공유 저장소 연결 필요"
+  status(code === "reload_required" ? "새 버전 · 페이지를 새로고침하세요."
+    : code === "room_full" ? "채널 정원 초과"
     : code === "too_fast" ? "잠시 후 다시 누르기" : "연결 실패 · 다시 시도 중");
-}
-async function request(path, body) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
-  try {
-    const response = await fetch(path, {
-      cache: "no-store", signal: controller.signal,
-      ...(body ? { method: "POST", headers: { "content-type": "application/json", ...(generation ? { "x-ping-generation": generation } : {}) }, body: JSON.stringify(body) } : {}),
-    });
-    const value = await response.json();
-    if (!response.ok) {
-      const error = new Error(value.error || "request_failed");
-      error.generation = value.generation;
-      throw error;
-    }
-    return value;
-  } finally { clearTimeout(timer); }
 }
 function unlockAudio() { pingSound.unlock(); }
 function alertPing() {
@@ -320,12 +289,11 @@ function acceptSignal(signal, audible = true) {
   if (user) { user.pingUntil = Math.max(user.pingUntil, signal.pingUntil); user.pingAt = signal.createdAt; }
   try { activity?.signal(signal, generation, users); } catch { /* history never blocks signaling */ }
   tabStatus.notice(signal, clientId, focused(), now());
-  drawUsers();
+  refreshDisplay();
   if (audible && now() - signal.createdAt < 10000 && signal.pingUntil > now()) { alertPing(); animatePing(); }
 }
-function applyState(state, fromStream = false) {
+function applyState(state) {
   if (!Array.isArray(state.users) || !state.epoch) throw new Error("reload_required");
-  if (fromStream && generation && state.generation !== generation) return false;
   if (!adoptGeneration(state.generation)) return false;
   if (epoch === state.epoch && (state.revision < revision || state.sequence < sequence)) return false;
   const initial = epoch === null || epoch !== state.epoch;
@@ -337,53 +305,26 @@ function applyState(state, fromStream = false) {
   channelPing = state.channelPing || null;
   revision = state.revision;
   sequence = state.sequence;
-  drawUsers();
+  if (renderedIds !== presentUsers().map(user => user.clientId).join(",")) drawUsers();
+  else refreshDisplay();
   transport(true);
   status();
   return true;
 }
-async function heartbeat() {
-  if (presenceBusy || pageStopped || navigator.onLine === false) return;
-  presenceBusy = true;
-  try { applyState(await request(`${api}/presence`, { clientId, sessionId, online: true })); }
-  catch (error) { transport(false); showError(error); }
-  finally { presenceBusy = false; }
-}
-async function poll() {
-  if (stateBusy || pageStopped || navigator.onLine === false || (streamAlive && Date.now() - lastStreamAt < 15000)) return;
-  stateBusy = true;
-  try { applyState(await request(`${api}/state`)); }
-  catch (error) { transport(false); showError(error); }
-  finally { stateBusy = false; }
-}
-function connectEvents() {
-  source?.close();
-  streamAlive = false;
-  if (pageStopped || navigator.onLine === false || !("EventSource" in globalThis)) return;
-  const query = new URLSearchParams({ clientId, sessionId });
-  if (cursor()) query.set("since", cursor());
-  const current = new EventSource(`${api}/events?${query}`);
-  source = current;
-  current.addEventListener("users", (event) => {
-    if (source !== current || pageStopped) return;
-    try {
-      if (applyState(JSON.parse(event.data), true)) { streamAlive = true; lastStreamAt = Date.now(); }
-    } catch (error) { showError(error); }
-  });
-  current.addEventListener("signal", (event) => {
-    if (source !== current || pageStopped) return;
-    try { acceptSignal(JSON.parse(event.data)); lastStreamAt = Date.now(); }
-    catch (error) { showError(error); }
-  });
-  current.onerror = () => { if (source === current) { streamAlive = false; void poll(); } };
-}
+const channel = new ChannelConnection(roomId, {
+  config(next) { config = { ...config, ...next }; notifyButton.hidden = !config.pushEnabled || !supportsPush(); },
+  welcome(id, state) { clientId = id; applyState(state); void registerPush().catch(() => {}); },
+  state(state) { applyState(state); },
+  disconnected() { transport(false); status("연결 끊김 · 다시 연결 중"); },
+  error: showError,
+});
 signalButton.addEventListener("click", async () => {
   if (!ready || !named() || nicknameEditing || nicknameBusy || document.body.classList.contains("sending")) return;
   unlockAudio();
   document.body.classList.add("sending");
   pendingRequestId ??= uid();
   try {
-    const state = await request(`${api}/signal`, { clientId, sessionId, requestId: pendingRequestId });
+    const state = await channel.command("signal", {}, pendingRequestId);
     if (applyState(state)) acceptSignal(state.signal);
     pendingRequestId = undefined;
   } catch (error) { showError(error); if (error.message === "too_fast") pendingRequestId = undefined; }
@@ -395,7 +336,7 @@ availabilityButton.addEventListener("click", async () => {
   availabilityBusy = true;
   refreshAvailability();
   try {
-    const state = await request(`${api}/availability`, { clientId, sessionId, available: user.available !== true });
+    const state = await channel.command("availability", { available: user.available !== true });
     applyState(state);
   } catch (error) { showError(error); }
   finally { availabilityBusy = false; refreshAvailability(); }
@@ -436,7 +377,7 @@ nicknameForm.addEventListener("submit", async (event) => {
   refreshNickname();
   refreshAvailability();
   try {
-    const state = await request(`${api}/nickname`, { clientId, sessionId, nickname: name });
+    const state = await channel.command("nickname", { nickname: name });
     applyState(state);
     if (state.generation !== generation || submittedGeneration !== generation) {
       const error = new Error("deployment_changed"); error.generation = state.generation; throw error;
@@ -476,7 +417,7 @@ function decodeKey(value) {
   return Uint8Array.from(raw, (char) => char.charCodeAt(0));
 }
 async function registerPush(interactive = false) {
-  if (!config.pushEnabled || !supportsPush() || !registrationPromise) return;
+  if (!ready || !config.pushEnabled || !supportsPush() || !registrationPromise) return;
   if (Notification.permission !== "granted") {
     if (!interactive || await Notification.requestPermission() !== "granted") return;
   }
@@ -495,7 +436,7 @@ async function registerPush(interactive = false) {
     if (!interactive) return;
     subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: expected });
   }
-  await request(`${api}/subscribe`, { clientId, sessionId, subscription: subscription.toJSON() });
+  await channel.command("subscribe", { subscription: subscription.toJSON() });
   notifyButton.classList.add("active");
 }
 notifyButton.addEventListener("click", () => {
@@ -504,39 +445,29 @@ notifyButton.addEventListener("click", () => {
 async function optionalFeatures() {
   try {
     if ("serviceWorker" in navigator) registrationPromise = navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => null);
-    config = { ...config, ...await request("/api/config") };
     notifyButton.hidden = !config.pushEnabled || !supportsPush();
     void registerPush().catch(() => {});
   } catch { notifyButton.hidden = true; }
 }
-function pause() { pingSound.stop(); source?.close(); source = undefined; streamAlive = false; }
-function leave() {
-  pageStopped = true;
-  pause();
-  try {
-    navigator.sendBeacon?.(`${api}/presence`, new Blob([JSON.stringify({ clientId, sessionId, online: false })], { type: "application/json" }));
-  } catch { /* no beacon needed: lease expiry removes this session */ }
-}
+function pause() { pingSound.stop(); channel.stop(); }
+function leave() { pageStopped = true; pause(); }
 function resume() {
-  if (pageStopped) return;
-  refreshTab();
-  connectEvents(); void heartbeat(); void registerPush().catch(() => {});
+  pageStopped = false;
+  refreshTab(); channel.start();
 }
 document.addEventListener("visibilitychange", () => {
   if (!visible()) pingSound.stop();
-  refreshTab();
+  channel.visibility(); refreshTab();
   if (visible()) { refreshDisplay(); resume(); }
 });
 globalThis.addEventListener("focus", refreshTab);
 globalThis.addEventListener("blur", refreshTab);
 globalThis.addEventListener("pagehide", leave);
-globalThis.addEventListener("pageshow", (event) => {
-  if (event.persisted || pageStopped) { pageStopped = false; resume(); }
-});
-document.addEventListener("freeze", () => { pageStopped = true; pause(); });
-document.addEventListener("resume", () => { pageStopped = false; resume(); });
+globalThis.addEventListener("pageshow", event => { if (event.persisted || pageStopped) resume(); });
+document.addEventListener("freeze", leave);
+document.addEventListener("resume", resume);
 globalThis.addEventListener("online", resume);
-globalThis.addEventListener("offline", () => { pause(); transport(false); status("오프라인"); });
+globalThis.addEventListener("offline", () => { pause(); status("오프라인"); });
 try {
   const historyStore = new LocalHistory(roomId, { now });
   activity = new HistoryTracker(historyStore);
@@ -544,10 +475,8 @@ try {
 } catch { /* core controls continue even if local recording is unavailable */ }
 transport(false);
 notifyButton.hidden = true;
-connectEvents();
-void heartbeat();
 void optionalFeatures();
+channel.start();
 setInterval(() => { if (!pageStopped && visible()) refreshDisplay(); }, 250);
 setInterval(refreshTab, 1000);
-setInterval(() => void heartbeat(), 15000);
-setInterval(() => void poll(), 5000);
+

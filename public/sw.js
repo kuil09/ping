@@ -1,13 +1,10 @@
-const CACHE = "ping-shell-v9-soft-chime";
-const SHELL = ["/index.html", "/styles.css", "/history.css", "/app.js", "/ping-sound.js", "/tab-status.js", "/profile.js", "/history.js", "/history-view.js", "/icon.svg", "/icon-active.svg", "/manifest.webmanifest"];
+const CACHE = "ping-cloudflare-v1";
+const SHELL = ["/index.html", "/styles.css", "/history.css", "/app.js", "/transport.js", "/ping-sound.js", "/tab-status.js", "/profile.js", "/history.js", "/history-view.js", "/icon.svg", "/icon-active.svg", "/manifest.webmanifest"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", event => {
-  event.waitUntil((async () => {
-    for (const key of await caches.keys()) if (key.startsWith("ping-shell-") && key !== CACHE) await caches.delete(key);
-    await self.clients.claim();
-  })());
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim()));
 });
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);

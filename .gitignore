@@ -1,2 +1,13 @@
-.env
+node_modules/
+.wrangler/
+dist/
+dist-test/
+dist-room-test/
+test-results/
+playwright-report/
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+*.log
 .DS_Store

@@ -1,22 +1,19 @@
-# Resource budget and rollout
+# 자원 예산 / Cloudflare v2
 
-## Applied server changes
+클라이언트와 Cloudflare 사이의 연결은 유지하되, 채널 코드는 쉬도록 만든다.
 
-- One KV watch per channel per app instance, not one per SSE subscriber. The KV room and bounded sequence log remain authoritative across independent instances.
-- Replace each stream's five-second full KV refresh with one 60-second reconciliation per active channel. Unchanged revisions do not produce full snapshots.
-- One small 25-second keepalive per active channel, without reading or writing KV. Cached lease/ping deadlines drive expiration updates; a server heartbeat never renews a client lease.
-- Abort/cancel, stream rotation, lease expiry and slow-reader overflow detach subscribers. When the last subscriber disappears the channel's watch and all timers are canceled and removed. The per-stream queue is byte-bounded (64 KiB high-water mark, allowing one additional bounded frame).
-- SSE rotation changes from three to ten minutes. Process eviction and network reconnect/replay remain supported.
-- `/api/health` exposes only aggregate per-instance live counters. No room identifiers, profiles, VAPID keys or subscriptions are exposed. These are software counters, not Deno billing telemetry.
+| 경로 | 서버 실행 | SQLite 변경 |
+|---|---|---|
+| 정적 화면/모듈 | CDN assets-first | 없음 |
+| 15초 클라이언트 `~ping` | 플랫폼 자동 응답; DO 핸들러 호출 없음 | 없음 |
+| 채널별 연결 만료 Alarm | 응답 시각 검사 후 재예약 | 구성원 변화 또는 정리 때 |
+| 새 핑/닉네임/가능 여부 | 한 채널 객체에서 처리 | 실제 행동을 저장 |
+| 매초 카운트다운 | 브라우저만 실행 | 없음 |
 
-## Deployment/test cost
+유휴 소켓의 존재만으로 DB watch나 polling을 만들지 않는다. 연결이 남아 있는 동안 Alarm은 필요하며 이것까지 0회 실행이라고 주장하지 않는다. WebSocket 자동 응답은 애플리케이션 ping 이벤트와 구별되는 고정 문자열이다.
 
-Full Chromium/WebKit regression and resource tests run against two local app processes and a local KV service in GitHub Actions. Automatic production verification is HTTP-only: at most six health checks and three static-asset reads, with no open channels, SSE or presence heartbeats. A full production suite requires explicit workflow_dispatch with full_browser=true. Superseded workflow runs are canceled. Batch source changes into one Git commit instead of triggering a deployment per file.
+모든 회귀 테스트는 로컬 workerd에 실행한다. 운영 서비스에 반복적인 테스트 트래픽을 만들지 않는다. Workers 배포는 수동 workflow_dispatch이며 PR preview는 기본 비활성이다.
 
-## Unchanged behavior and remaining constraints
+한도: 방 64명, 128소켓, 메시지 8KiB, 사용자별 핑 최소 1초 간격, 연결별 비-heartbeat 메시지 10초당 30개. 서버가 사용자 ID를 수신 메시지에서 신뢰하지 않는다. 알림 대상 endpoint는 허용된 HTTPS push 서비스로 제한하고 리다이렉트를 따라가지 않는다.
 
-The frontend is unchanged in this rollout: executable background tabs retain real-time connections and fifteen-second client heartbeats; availability, nickname onboarding, countdown, audio and local history are not altered. Same-browser multiple tabs still have independent network sessions; browser-side owner election is not included in this deployment. Presence remains a 45-second lease, independent of availability. KV reset on a new deployment still resets server push registrations; reopened clients re-register, while browser-local history remains.
-
-These changes reduce duplicated watchers, reads, serializations and abandoned streams. They do not erase consumed quota and do not eliminate the memory-time floor of a live Deno instance. Keeping instant background signaling still keeps compute loaded. Do not claim a percentage reduction in Deno GiB-hours from the synthetic resource test. Existing organization verification, billing limits and preview-routing settings must be checked in the Deno console; this code does not change plans or authenticate an organization.
-
-References: https://docs.deno.com/deploy/reference/runtime/ and https://deno.com/deploy/pricing
+무료 한도 초과를 막는 모든 남용 방어가 포함된 것은 아니다. 방 링크는 아는 사람에게만 공유하고 초기 테스트부터 대시보드 사용량을 확인한다.

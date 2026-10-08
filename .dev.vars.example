@@ -1,0 +1,5 @@
+# Optional locally. Without these, the room still works; only Web Push is disabled.
+# Never commit actual private keys or paste them into issues.
+VAPID_PUBLIC_KEY=""
+VAPID_PRIVATE_KEY=""
+VAPID_SUBJECT="mailto:replace-with-your-email@example.com"

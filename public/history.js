@@ -1,8 +1,8 @@
-export const HISTORY_VERSION = "local-history-v1";
+export const HISTORY_VERSION = "local-history-v2";
 export const HISTORY_LIMIT = 300;
 export const HISTORY_DAYS = 30;
 const AGE = HISTORY_DAYS * 86_400_000;
-const ROOT = "ping:history:v1:";
+const ROOT = "ping:history:v2:";
 const KINDS = new Set(["ping", "availability", "nickname", "join", "leave", "reset"]);
 function validEntry(value) {
   return value && typeof value.id === "string" && value.id.length <= 512 &&

@@ -1,57 +1,44 @@
-name: CI
-
+name: Cloudflare CI
 on:
   push:
     branches: [main]
   pull_request:
-
 permissions:
   contents: read
-
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      PING_KV_URL: http://127.0.0.1:4512
-      DENO_KV_ACCESS_TOKEN: local-ci-test-token-not-a-production-secret
     steps:
       - uses: actions/checkout@v4
-      - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
-      - run: deno task check
-      - run: deno task test
-      - name: Start a shared KV backend for two independent app processes
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install the exact reviewed dependencies
+        run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:runtime
+      - name: Install isolated browser engines and Korean fonts
         run: |
-          mkdir -p .ci-kv
-          chmod 777 .ci-kv
-          docker run -d --init --name ping-kv -p 127.0.0.1:4512:4512 -v "$PWD/.ci-kv:/data" ghcr.io/denoland/denokv --sqlite-path /data/kv.sqlite serve --access-token "$DENO_KV_ACCESS_TOKEN"
-          PORT=9101 deno run -A main.ts > server-a.log 2>&1 &
-          PORT=9102 deno run -A main.ts > server-b.log 2>&1 &
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:9101/api/health && curl -fsS http://127.0.0.1:9102/api/health; then break; fi
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:9101/api/health
-          curl -fsS http://127.0.0.1:9102/api/health
-      - name: Install browser test tools
-        run: |
-          npm install --no-save --package-lock=false @playwright/test@1.56.1
           npx playwright install --with-deps chromium webkit
-      - name: Cross-process mobile, audio and resource regression tests
-        run: npx playwright test --config=playwright.config.cjs
-      - name: Upload test evidence
+          sudo apt-get install -y fonts-noto-cjk
+      - name: Native workerd WebSocket, alarm and browser regressions
+        run: npm run test:browser
+      - name: Collect built worker and regression evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ping-regression-evidence
+          name: cloudflare-verification
           path: |
+            package-lock.json
+            dist/
             test-results/
-            server-a.log
-            server-b.log
           retention-days: 7

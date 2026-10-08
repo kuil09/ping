@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ping",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/", "/r/*", "/api/*"],
+    "html_handling": "none",
+    "not_found_handling": "none"
+  },
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "PingRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PingRoom"] }],
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 }
+}
