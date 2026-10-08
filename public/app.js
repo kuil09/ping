@@ -67,7 +67,18 @@ const now = () => Date.now() + clockOffset;
 const presentUsers = () => users.filter((user) => user.online);
 const me = () => users.find((user) => user.clientId === clientId);
 const named = () => Boolean(me()?.nickname?.trim());
-function status(message = "") { statusEl.textContent = message; }
+// Keep existing text nodes during taps, composition and focus. A same-value
+// textContent assignment still replaces a button's children in the DOM.
+function text(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
+function attribute(element, name, value) {
+  if (element && element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+function property(element, name, value) {
+  if (element[name] !== value) element[name] = value;
+}
+function status(message = "") { text(statusEl, message); }
 function transport(value) {
   ready = value;
   connection.classList.toggle("online", value);
@@ -94,7 +105,7 @@ function adoptGeneration(next) {
     // A deployment resets the confirmed profile, never the local activity history.
     nicknameEditing = false;
     if (!nicknameDirty) nicknameInput.value = "";
-    nicknameFeedback.textContent = "";
+    text(nicknameFeedback, "");
     queueMicrotask(() => void registerPush().catch(() => {}));
   }
   return true;
@@ -127,33 +138,33 @@ function animatePing() {
 function refreshAvailability() {
   const user = me();
   const profileReady = named();
-  availabilityControl.hidden = !profileReady;
-  availabilityButton.disabled = !ready || availabilityBusy || !profileReady || nicknameBusy || nicknameEditing;
-  availabilityButton.setAttribute("aria-busy", String(availabilityBusy));
-  availabilityButton.setAttribute("aria-checked", String(user?.available === true));
-  availabilityState.textContent = user?.available === true ? "가능" : "불가능";
+  property(availabilityControl, "hidden", !profileReady);
+  property(availabilityButton, "disabled", !ready || availabilityBusy || !profileReady || nicknameBusy || nicknameEditing);
+  attribute(availabilityButton, "aria-busy", String(availabilityBusy));
+  attribute(availabilityButton, "aria-checked", String(user?.available === true));
+  text(availabilityState, user?.available === true ? "가능" : "불가능");
   // Reading incoming pings and recording history never depend on completing this form.
-  signalButton.disabled = !ready || !profileReady || nicknameBusy || nicknameEditing;
+  property(signalButton, "disabled", !ready || !profileReady || nicknameBusy || nicknameEditing);
 }
 function refreshNickname() {
   const user = me();
   const hasName = named();
   const expanded = !hasName || nicknameEditing || nicknameBusy;
-  nicknameForm.hidden = !expanded;
-  document.body.dataset.profileStep = !hasName ? "nickname" : expanded ? "editing" : "ready";
-  nicknameLabel.textContent = hasName ? "닉네임 수정" : "닉네임으로 시작";
-  nicknameHint.textContent = hasName ? "채널에 표시되는 이름 · 최대 20자" : "닉네임을 적용한 뒤 내 상태를 선택하세요.";
-  nicknameCancel.hidden = !hasName;
-  nicknameCancel.disabled = nicknameBusy;
-  if (user && !nicknameDirty && !nicknameBusy) nicknameInput.value = user.nickname || "";
-  nicknameInput.disabled = !ready || !user;
-  nicknameInput.readOnly = nicknameBusy;
-  nicknameSave.disabled = !ready || !user || nicknameBusy || !nicknameDirty;
-  nicknameSave.textContent = nicknameBusy ? "적용 중" : "적용";
-  nicknameForm.setAttribute("aria-busy", String(nicknameBusy));
+  property(nicknameForm, "hidden", !expanded);
+  attribute(document.body, "data-profile-step", !hasName ? "nickname" : expanded ? "editing" : "ready");
+  text(nicknameLabel, hasName ? "닉네임 수정" : "닉네임으로 시작");
+  text(nicknameHint, hasName ? "채널에 표시되는 이름 · 최대 20자" : "닉네임을 적용한 뒤 내 상태를 선택하세요.");
+  property(nicknameCancel, "hidden", !hasName);
+  property(nicknameCancel, "disabled", nicknameBusy);
+  if (user && !nicknameDirty && !nicknameBusy) property(nicknameInput, "value", user.nickname || "");
+  property(nicknameInput, "disabled", !ready || !user);
+  property(nicknameInput, "readOnly", nicknameBusy);
+  property(nicknameSave, "disabled", !ready || !user || nicknameBusy || !nicknameDirty);
+  text(nicknameSave, nicknameBusy ? "적용 중" : "적용");
+  attribute(nicknameForm, "aria-busy", String(nicknameBusy));
   for (const button of usersEl.querySelectorAll(".user-profile")) {
-    button.disabled = !ready || nicknameBusy;
-    button.setAttribute("aria-expanded", String(expanded));
+    property(button, "disabled", !ready || nicknameBusy);
+    attribute(button, "aria-expanded", String(expanded));
   }
 }
 function editNickname() {
@@ -161,7 +172,7 @@ function editNickname() {
   nicknameEditing = true;
   nicknameDirty = false;
   nicknameInput.value = me()?.nickname || "";
-  nicknameFeedback.textContent = "";
+  text(nicknameFeedback, "");
   nicknameInput.removeAttribute("aria-invalid");
   refreshNickname();
   refreshAvailability();
@@ -172,7 +183,7 @@ function cancelNickname() {
   if (nicknameBusy || !named()) return;
   nicknameEditing = false;
   nicknameDirty = false;
-  nicknameFeedback.textContent = "";
+  text(nicknameFeedback, "");
   nicknameInput.removeAttribute("aria-invalid");
   refreshNickname();
   refreshAvailability();
@@ -243,11 +254,11 @@ function refreshDisplay() {
     item.dataset.online = "true";
     item.dataset.available = String(available);
     item.style.setProperty("--user-life", String(life));
-    item.querySelector(".user-name").textContent = name;
-    item.querySelector(".user-name").title = name;
-    item.querySelector(".user-label").textContent = `${user.clientId === clientId ? "나 · " : ""}${available ? "가능" : "불가능"}`;
-    item.setAttribute("aria-label", `${name}${user.clientId === clientId ? " · 나" : ""} · ${available ? "가능" : "불가능"} · 핑 ${life > 0 ? "ON" : "OFF"}`);
-    item.querySelector(".user-profile")?.setAttribute("aria-label", `${name} · 내 프로필 수정`);
+    text(item.querySelector(".user-name"), name);
+    property(item.querySelector(".user-name"), "title", name);
+    text(item.querySelector(".user-label"), `${user.clientId === clientId ? "나 · " : ""}${available ? "가능" : "불가능"}`);
+    attribute(item, "aria-label", `${name}${user.clientId === clientId ? " · 나" : ""} · ${available ? "가능" : "불가능"} · 핑 ${life > 0 ? "ON" : "OFF"}`);
+    attribute(item.querySelector(".user-profile"), "aria-label", `${name} · 내 프로필 수정`);
   });
   const remaining = channelPing ? Math.max(0, channelPing.pingUntil - time) : 0;
   const life = Math.min(1, remaining / config.signalTtlMs);
@@ -257,23 +268,23 @@ function refreshDisplay() {
   if (channelPing) {
     pingTime.dateTime = new Date(channelPing.createdAt).toISOString();
     pingTime.dataset.createdAt = String(channelPing.createdAt);
-    pingTime.textContent = timeFormat.format(channelPing.createdAt);
+    text(pingTime, timeFormat.format(channelPing.createdAt));
     const seconds = Math.max(0, Math.floor((time - channelPing.createdAt) / 1000));
     const elapsed = seconds < 2 ? "방금" : seconds < 60 ? `${seconds}초 전` : `${Math.floor(seconds / 60)}분 전`;
     const left = Math.ceil(remaining / 1000);
-    pingAge.textContent = remaining > 0 ? `${elapsed} · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} 남음` : `${elapsed} · 종료`;
+    text(pingAge, remaining > 0 ? `${elapsed} · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} 남음` : `${elapsed} · 종료`);
   } else {
     pingTime.removeAttribute("datetime");
     pingTime.removeAttribute("data-created-at");
-    pingTime.textContent = "--:--:--";
-    pingAge.textContent = "아직 없음";
+    text(pingTime, "--:--:--");
+    text(pingAge, "아직 없음");
   }
   refreshTab();
   const availableCount = current.filter((user) => user.available === true).length;
-  memberCount.textContent = `${current.length}명 · ${availableCount}명 가능`;
-  usersEl.setAttribute("aria-label", `${current.length}명 · ${availableCount}명 가능 · ${active}명 핑 ON`);
-  refreshAvailability();
-  refreshNickname();
+  text(memberCount, `${current.length}명 · ${availableCount}명 가능`);
+  attribute(usersEl, "aria-label", `${current.length}명 · ${availableCount}명 가능 · ${active}명 핑 ON`);
+  // The decay/clock tick never rerenders editable controls. Their actual state,
+  // input, busy and connectivity transitions call refreshNickname/Availability.
 }
 function acceptSignal(signal, audible = true) {
   if (!signal?.eventId || seen.has(signal.eventId)) return;
@@ -345,7 +356,7 @@ nicknameInput.addEventListener("input", () => {
   nicknameEditing = true;
   nicknameDirty = nicknameInput.value !== (me()?.nickname || "");
   nicknameInput.removeAttribute("aria-invalid");
-  nicknameFeedback.textContent = "";
+  text(nicknameFeedback, "");
   refreshNickname();
   refreshAvailability();
 });
@@ -373,7 +384,7 @@ nicknameForm.addEventListener("submit", async (event) => {
   const submittedGeneration = generation;
   let focusTarget;
   nicknameBusy = true;
-  nicknameFeedback.textContent = "";
+  text(nicknameFeedback, "");
   refreshNickname();
   refreshAvailability();
   try {
