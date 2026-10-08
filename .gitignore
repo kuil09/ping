@@ -2,6 +2,7 @@ node_modules/
 .wrangler/
 dist/
 dist-test/
+dist-room-test/
 test-results/
 playwright-report/
 .dev.vars*

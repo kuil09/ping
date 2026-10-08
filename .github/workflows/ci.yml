@@ -4,7 +4,7 @@ on:
     branches: [main]
   pull_request:
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -19,25 +19,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-      - name: Stage the generated public dependency lock blob for review (temporary)
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node -e "const fs=require('fs');fs.writeFileSync('/tmp/lock-blob.json',JSON.stringify({content:fs.readFileSync('package-lock.json','utf8'),encoding:'utf-8'}))"
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" --input /tmp/lock-blob.json --jq .sha
-          git hash-object package-lock.json
+          cache: npm
+      - name: Install the exact reviewed dependencies
+        run: npm ci --no-audit --no-fund
       - run: npm run check
       - run: npm test
       - run: npm run build
       - run: npm run test:runtime
-      - name: Install isolated browser engines
-        run: npx playwright install --with-deps chromium webkit
+      - name: Install isolated browser engines and Korean fonts
+        run: |
+          npx playwright install --with-deps chromium webkit
+          sudo apt-get install -y fonts-noto-cjk
       - name: Native workerd WebSocket, alarm and browser regressions
         run: npm run test:browser
-      - name: Collect exact lockfile, built worker and regression evidence
+      - name: Collect built worker and regression evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:

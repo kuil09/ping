@@ -9,7 +9,7 @@
     "check": "tsc --noEmit && node scripts/check.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:browser": "playwright test",
-    "test:runtime": "wrangler deploy tests/push-runtime-worker.ts --dry-run --outdir dist-test && node scripts/test-push-runtime.mjs",
+    "test:runtime": "wrangler deploy tests/push-runtime-worker.ts --dry-run --outdir dist-test && node scripts/test-push-runtime.mjs && wrangler deploy tests/room-runtime-worker.ts --dry-run --outdir dist-room-test && node scripts/test-room-runtime.mjs",
     "build": "wrangler deploy --dry-run --outdir dist",
     "deploy": "wrangler deploy",
     "vapid": "node scripts/vapid.mjs"
