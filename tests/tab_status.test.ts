@@ -1,10 +1,11 @@
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ALERT_ICONS, countdown, TabStatus } from "../public/tab-status.js";
 
 const start = 1_000_000;
 const ping = { eventId: "epoch:1", clientId: "peer", createdAt: start, pingUntil: start + 300_000 };
 
-Deno.test("countdown rounds up, pads digits, and clamps at zero", () => {
+test("countdown rounds up, pads digits, and clamps at zero", () => {
   assert.equal(countdown(ping.pingUntil, start), "05:00");
   assert.equal(countdown(ping.pingUntil, start + 1001), "04:59");
   assert.equal(countdown(ping.pingUntil, ping.pingUntil - 1), "00:01");
@@ -12,18 +13,18 @@ Deno.test("countdown rounds up, pads digits, and clamps at zero", () => {
   assert.equal(countdown(ping.pingUntil, ping.pingUntil + 9999), "00:00");
   assert.equal(countdown(NaN, start), "00:00");
 });
-Deno.test("idle tab has a stable normal title and icon", () => {
+test("idle tab has a stable normal title and icon", () => {
   const tab = new TabStatus().view(null, start, 3, 0, true);
   assert.equal(tab.title, "ping · 3명");
   assert.equal(tab.icon, "/icon.svg");
   assert.equal(tab.countdown, null);
 });
-Deno.test("active tab places countdown before participant counts", () => {
+test("active tab places countdown before participant counts", () => {
   const tab = new TabStatus().view(ping, start + 2000, 3, 2, true);
   assert.equal(tab.title, "04:58 · ping · 2/3명");
   assert.equal(tab.icon, "/icon-active.svg");
 });
-Deno.test("unseen peer ping alternates title and high contrast favicon", () => {
+test("unseen peer ping alternates title and high contrast favicon", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   const first = status.view(ping, start, 2, 1, false);
@@ -34,7 +35,7 @@ Deno.test("unseen peer ping alternates title and high contrast favicon", () => {
   assert.equal(second.icon, ALERT_ICONS[1]);
   assert.equal(first.unread, true);
 });
-Deno.test("attention pulse is bounded; unread marker remains until focus or expiry", () => {
+test("attention pulse is bounded; unread marker remains until focus or expiry", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   const tab = status.view(ping, start + 14000, 2, 1, false);
@@ -42,7 +43,7 @@ Deno.test("attention pulse is bounded; unread marker remains until focus or expi
   assert.equal(tab.unread, true);
   assert.equal(tab.title, "04:46 · PING! · 1/2명");
 });
-Deno.test("focus acknowledges attention without clearing countdown", () => {
+test("focus acknowledges attention without clearing countdown", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   const tab = status.view(ping, start + 3000, 2, 1, true);
@@ -51,7 +52,7 @@ Deno.test("focus acknowledges attention without clearing countdown", () => {
   status.notice(ping, "self", false, start + 4000);
   assert.equal(status.view(ping, start + 4000, 2, 1, false).unread, false);
 });
-Deno.test("self pings and already visible peer pings never demand attention", () => {
+test("self pings and already visible peer pings never demand attention", () => {
   const status = new TabStatus();
   status.notice(ping, "peer", false, start);
   assert.equal(status.view(ping, start, 2, 1, false).unread, false);
@@ -59,7 +60,7 @@ Deno.test("self pings and already visible peer pings never demand attention", ()
   status.notice(ping, "self", true, start);
   assert.equal(status.view(ping, start, 2, 1, false).unread, false);
 });
-Deno.test("new peer ping renews countdown; duplicate retry does not restart the pulse", () => {
+test("new peer ping renews countdown; duplicate retry does not restart the pulse", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   status.notice(ping, "self", false, start + 13000);
@@ -70,7 +71,7 @@ Deno.test("new peer ping renews countdown; duplicate retry does not restart the 
   assert.equal(tab.countdown, "05:00");
   assert.equal(tab.pulsing, true);
 });
-Deno.test("timer suspension skips directly to correct remaining time and expiry", () => {
+test("timer suspension skips directly to correct remaining time and expiry", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   status.view(ping, start, 2, 1, false);
@@ -80,7 +81,7 @@ Deno.test("timer suspension skips directly to correct remaining time and expiry"
   assert.equal(expired.icon, "/icon.svg");
   assert.equal(expired.unread, false);
 });
-Deno.test("reduced motion uses a steady alert icon and keeps ticking", () => {
+test("reduced motion uses a steady alert icon and keeps ticking", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   const a = status.view(ping, start, 2, 1, false, true);
@@ -89,7 +90,7 @@ Deno.test("reduced motion uses a steady alert icon and keeps ticking", () => {
   assert.equal(b.pulsing, false);
   assert.equal(b.title, "04:59 · PING! · 1/2명");
 });
-Deno.test("deployment reset removes previous unread attention", () => {
+test("deployment reset removes previous unread attention", () => {
   const status = new TabStatus();
   status.notice(ping, "self", false, start);
   status.reset();

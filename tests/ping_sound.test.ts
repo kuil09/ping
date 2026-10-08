@@ -1,8 +1,9 @@
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PingSound, PING_SOUND_PEAK, PING_SOUND_SECONDS, renderPingSamples } from "../public/ping-sound.js";
 
 const rms = (data: Float32Array) => Math.sqrt(data.reduce((sum, value) => sum + value * value, 0) / data.length);
-Deno.test("soft chime is finite, deterministic and has ample peak headroom at common sample rates", () => {
+test("soft chime is finite, deterministic and has ample peak headroom at common sample rates", () => {
   for (const rate of [8000, 44100, 48000, 96000]) {
     const samples = renderPingSamples(rate);
     assert.equal(samples.length, Math.ceil(rate * PING_SOUND_SECONDS));
@@ -15,7 +16,7 @@ Deno.test("soft chime is finite, deterministic and has ample peak headroom at co
     assert.deepEqual(samples, renderPingSamples(rate));
   }
 });
-Deno.test("rounded onset and quiet tail surround two distinct soft strikes", () => {
+test("rounded onset and quiet tail surround two distinct soft strikes", () => {
   const rate = 48000, samples = renderPingSamples(rate);
   const part = (start: number, end: number) => samples.slice(Math.floor(start * rate), Math.floor(end * rate));
   const first = rms(part(0.02, 0.09)), second = rms(part(0.20, 0.27));
@@ -27,12 +28,12 @@ Deno.test("rounded onset and quiet tail surround two distinct soft strikes", () 
   for (let i = 1; i < samples.length; i++) step = Math.max(step, Math.abs(samples[i] - samples[i - 1]));
   assert.ok(step < 0.03);
 });
-Deno.test("invalid sample rates are rejected without allocating an unbounded buffer", () => {
+test("invalid sample rates are rejected without allocating an unbounded buffer", () => {
   for (const rate of [0, -1, NaN, Infinity, 48000.5, 7999, 192001]) {
     assert.throws(() => renderPingSamples(rate), RangeError);
   }
 });
-Deno.test("missing or throwing audio never plays and never throws into application flow", () => {
+test("missing or throwing audio never plays and never throws into application flow", () => {
   for (const create of [() => null, () => { throw new Error("blocked"); }]) {
     const sound = new PingSound(create);
     assert.equal(sound.play(), false);
